@@ -1,0 +1,57 @@
+name: Update NBA injuries JSON
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/15 * * * *'
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install PHP and PDF tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-curl php-mbstring poppler-utils
+
+      - name: Run updater
+        run: php scripts/update_injuries.php
+
+      - name: Show fresh timestamp
+        run: |
+          php -r '$data=json_decode(file_get_contents("data/injuries.json"), true); echo "last_updated=" . ($data["last_updated"] ?? "") . PHP_EOL; echo "records=" . count($data["items"] ?? []) . PHP_EOL;'
+
+      - name: Upload injuries.json to SpaceWeb
+        env:
+          UPLOAD_BASE_URL: ${{ secrets.UPLOAD_BASE_URL }}
+          UPLOAD_USERNAME: ${{ secrets.UPLOAD_USERNAME }}
+          UPLOAD_PASSWORD: ${{ secrets.UPLOAD_PASSWORD }}
+        run: |
+          test -n "$UPLOAD_BASE_URL"
+          test -n "$UPLOAD_USERNAME"
+          test -n "$UPLOAD_PASSWORD"
+          curl --fail --silent --show-error \
+            --user "$UPLOAD_USERNAME:$UPLOAD_PASSWORD" \
+            --ftp-create-dirs \
+            -T data/injuries.json \
+            "$UPLOAD_BASE_URL/data/injuries.json"
+
+      - name: Upload updater log to SpaceWeb
+        if: always()
+        env:
+          UPLOAD_BASE_URL: ${{ secrets.UPLOAD_BASE_URL }}
+          UPLOAD_USERNAME: ${{ secrets.UPLOAD_USERNAME }}
+          UPLOAD_PASSWORD: ${{ secrets.UPLOAD_PASSWORD }}
+        run: |
+          if [ -f logs/update_injuries.log ]; then
+            curl --silent --show-error \
+              --user "$UPLOAD_USERNAME:$UPLOAD_PASSWORD" \
+              --ftp-create-dirs \
+              -T logs/update_injuries.log \
+              "$UPLOAD_BASE_URL/logs/update_injuries.log" || true
+          fi
