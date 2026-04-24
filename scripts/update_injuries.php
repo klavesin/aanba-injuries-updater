@@ -10,8 +10,8 @@ const DATA_FILE = DATA_DIR . '/injuries.json';
 const LOG_FILE = LOG_DIR . '/update_injuries.log';
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
-
 const OFFICIAL_REPORT_PAGE = 'https://official.nba.com/nba-injury-report-2025-26-season/';
+
 const PDF_CONNECT_TIMEOUT = 30;
 const PDF_DOWNLOAD_TIMEOUT = 120;
 const PDF_CANDIDATES_TO_TRY = 5;
@@ -20,7 +20,7 @@ const STATUS_MAP_RU = [
     'Out' => 'Не сыграет',
     'Questionable' => 'Под вопросом',
     'Doubtful' => 'Скорее не сыграет',
-    'Available' => 'Сыграет',
+    'Available' => 'Доступен к игре',
     'Probable' => 'Скорее сыграет',
     'Game-Time Decision' => 'Решение в день матча',
 ];
@@ -59,41 +59,175 @@ const TEAM_RU_MAP = [
 ];
 
 const TEAM_ALIASES = [
-    'Atlanta Hawks' => 'Atlanta Hawks', 'Atlanta' => 'Atlanta Hawks',
-    'Boston Celtics' => 'Boston Celtics', 'Boston' => 'Boston Celtics',
-    'Brooklyn Nets' => 'Brooklyn Nets', 'Brooklyn' => 'Brooklyn Nets',
-    'Charlotte Hornets' => 'Charlotte Hornets', 'Charlotte' => 'Charlotte Hornets',
-    'Chicago Bulls' => 'Chicago Bulls', 'Chicago' => 'Chicago Bulls',
-    'Cleveland Cavaliers' => 'Cleveland Cavaliers', 'Cleveland' => 'Cleveland Cavaliers',
-    'Dallas Mavericks' => 'Dallas Mavericks', 'Dallas' => 'Dallas Mavericks',
-    'Denver Nuggets' => 'Denver Nuggets', 'Denver' => 'Denver Nuggets',
-    'Detroit Pistons' => 'Detroit Pistons', 'Detroit' => 'Detroit Pistons',
-    'Golden State Warriors' => 'Golden State Warriors', 'Golden State' => 'Golden State Warriors',
-    'Houston Rockets' => 'Houston Rockets', 'Houston' => 'Houston Rockets',
-    'Indiana Pacers' => 'Indiana Pacers', 'Indiana' => 'Indiana Pacers',
-    'Los Angeles Clippers' => 'Los Angeles Clippers', 'LA Clippers' => 'Los Angeles Clippers', 'L.A. Clippers' => 'Los Angeles Clippers',
-    'Los Angeles Lakers' => 'Los Angeles Lakers', 'L.A. Lakers' => 'Los Angeles Lakers',
-    'Memphis Grizzlies' => 'Memphis Grizzlies', 'Memphis' => 'Memphis Grizzlies',
-    'Miami Heat' => 'Miami Heat', 'Miami' => 'Miami Heat',
-    'Milwaukee Bucks' => 'Milwaukee Bucks', 'Milwaukee' => 'Milwaukee Bucks',
-    'Minnesota Timberwolves' => 'Minnesota Timberwolves', 'Minnesota' => 'Minnesota Timberwolves',
-    'New Orleans Pelicans' => 'New Orleans Pelicans', 'New Orleans' => 'New Orleans Pelicans',
-    'New York Knicks' => 'New York Knicks', 'New York' => 'New York Knicks',
-    'Oklahoma City Thunder' => 'Oklahoma City Thunder', 'Oklahoma City' => 'Oklahoma City Thunder',
-    'Orlando Magic' => 'Orlando Magic', 'Orlando' => 'Orlando Magic',
-    'Philadelphia 76ers' => 'Philadelphia 76ers', 'Philadelphia' => 'Philadelphia 76ers',
-    'Phoenix Suns' => 'Phoenix Suns', 'Phoenix' => 'Phoenix Suns',
-    'Portland Trail Blazers' => 'Portland Trail Blazers', 'Portland' => 'Portland Trail Blazers',
-    'Sacramento Kings' => 'Sacramento Kings', 'Sacramento' => 'Sacramento Kings',
-    'San Antonio Spurs' => 'San Antonio Spurs', 'San Antonio' => 'San Antonio Spurs',
-    'Toronto Raptors' => 'Toronto Raptors', 'Toronto' => 'Toronto Raptors',
-    'Utah Jazz' => 'Utah Jazz', 'Utah' => 'Utah Jazz',
-    'Washington Wizards' => 'Washington Wizards', 'Washington' => 'Washington Wizards',
+    'Atlanta Hawks' => 'Atlanta Hawks', 'Atlanta' => 'Atlanta Hawks', 'ATL' => 'Atlanta Hawks',
+    'Boston Celtics' => 'Boston Celtics', 'Boston' => 'Boston Celtics', 'BOS' => 'Boston Celtics',
+    'Brooklyn Nets' => 'Brooklyn Nets', 'Brooklyn' => 'Brooklyn Nets', 'BKN' => 'Brooklyn Nets',
+    'Charlotte Hornets' => 'Charlotte Hornets', 'Charlotte' => 'Charlotte Hornets', 'CHA' => 'Charlotte Hornets',
+    'Chicago Bulls' => 'Chicago Bulls', 'Chicago' => 'Chicago Bulls', 'CHI' => 'Chicago Bulls',
+    'Cleveland Cavaliers' => 'Cleveland Cavaliers', 'Cleveland' => 'Cleveland Cavaliers', 'CLE' => 'Cleveland Cavaliers',
+    'Dallas Mavericks' => 'Dallas Mavericks', 'Dallas' => 'Dallas Mavericks', 'DAL' => 'Dallas Mavericks',
+    'Denver Nuggets' => 'Denver Nuggets', 'Denver' => 'Denver Nuggets', 'DEN' => 'Denver Nuggets',
+    'Detroit Pistons' => 'Detroit Pistons', 'Detroit' => 'Detroit Pistons', 'DET' => 'Detroit Pistons',
+    'Golden State Warriors' => 'Golden State Warriors', 'Golden State' => 'Golden State Warriors', 'GSW' => 'Golden State Warriors',
+    'Houston Rockets' => 'Houston Rockets', 'Houston' => 'Houston Rockets', 'HOU' => 'Houston Rockets',
+    'Indiana Pacers' => 'Indiana Pacers', 'Indiana' => 'Indiana Pacers', 'IND' => 'Indiana Pacers',
+    'Los Angeles Clippers' => 'Los Angeles Clippers', 'LA Clippers' => 'Los Angeles Clippers', 'L.A. Clippers' => 'Los Angeles Clippers', 'LAC' => 'Los Angeles Clippers',
+    'Los Angeles Lakers' => 'Los Angeles Lakers', 'L.A. Lakers' => 'Los Angeles Lakers', 'LAL' => 'Los Angeles Lakers',
+    'Memphis Grizzlies' => 'Memphis Grizzlies', 'Memphis' => 'Memphis Grizzlies', 'MEM' => 'Memphis Grizzlies',
+    'Miami Heat' => 'Miami Heat', 'Miami' => 'Miami Heat', 'MIA' => 'Miami Heat',
+    'Milwaukee Bucks' => 'Milwaukee Bucks', 'Milwaukee' => 'Milwaukee Bucks', 'MIL' => 'Milwaukee Bucks',
+    'Minnesota Timberwolves' => 'Minnesota Timberwolves', 'Minnesota' => 'Minnesota Timberwolves', 'MIN' => 'Minnesota Timberwolves',
+    'New Orleans Pelicans' => 'New Orleans Pelicans', 'New Orleans' => 'New Orleans Pelicans', 'NOP' => 'New Orleans Pelicans',
+    'New York Knicks' => 'New York Knicks', 'New York' => 'New York Knicks', 'NYK' => 'New York Knicks',
+    'Oklahoma City Thunder' => 'Oklahoma City Thunder', 'Oklahoma City' => 'Oklahoma City Thunder', 'OKC' => 'Oklahoma City Thunder',
+    'Orlando Magic' => 'Orlando Magic', 'Orlando' => 'Orlando Magic', 'ORL' => 'Orlando Magic',
+    'Philadelphia 76ers' => 'Philadelphia 76ers', 'Philadelphia' => 'Philadelphia 76ers', 'PHI' => 'Philadelphia 76ers',
+    'Phoenix Suns' => 'Phoenix Suns', 'Phoenix' => 'Phoenix Suns', 'PHX' => 'Phoenix Suns',
+    'Portland Trail Blazers' => 'Portland Trail Blazers', 'Portland' => 'Portland Trail Blazers', 'POR' => 'Portland Trail Blazers',
+    'Sacramento Kings' => 'Sacramento Kings', 'Sacramento' => 'Sacramento Kings', 'SAC' => 'Sacramento Kings',
+    'San Antonio Spurs' => 'San Antonio Spurs', 'San Antonio' => 'San Antonio Spurs', 'SAS' => 'San Antonio Spurs',
+    'Toronto Raptors' => 'Toronto Raptors', 'Toronto' => 'Toronto Raptors', 'TOR' => 'Toronto Raptors',
+    'Utah Jazz' => 'Utah Jazz', 'Utah' => 'Utah Jazz', 'UTA' => 'Utah Jazz',
+    'Washington Wizards' => 'Washington Wizards', 'Washington' => 'Washington Wizards', 'WAS' => 'Washington Wizards',
 ];
 
 const MONTH_MAP = [
     'Jan' => '01', 'Feb' => '02', 'Mar' => '03', 'Apr' => '04', 'May' => '05', 'Jun' => '06',
     'Jul' => '07', 'Aug' => '08', 'Sep' => '09', 'Oct' => '10', 'Nov' => '11', 'Dec' => '12',
+];
+
+/**
+ * Ручной словарь — главный источник качественного написания имён.
+ * Если игрока тут нет, включается fallback-транслитерация, чтобы в интерфейсе не было английских имён.
+ */
+const PLAYER_RU_MAP = [
+    'LeBron James' => 'Леброн Джеймс',
+    'Anthony Davis' => 'Энтони Дэвис',
+    'Luka Doncic' => 'Лука Дончич',
+    'Austin Reaves' => 'Остин Ривз',
+    'Rui Hachimura' => 'Руи Хатимура',
+    'Dorian Finney-Smith' => 'Дориан Финни-Смит',
+    'Gabe Vincent' => 'Гэйб Винсент',
+    'Jarred Vanderbilt' => 'Джарред Вандербилт',
+    'Jaxson Hayes' => 'Джексон Хэйс',
+    'Maxi Kleber' => 'Макси Клебер',
+    'Christian Wood' => 'Кристиан Вуд',
+    'Nikola Jokic' => 'Никола Йокич',
+    'Jamal Murray' => 'Джамал Мюррей',
+    'Michael Porter Jr.' => 'Майкл Портер мл.',
+    'Aaron Gordon' => 'Аарон Гордон',
+    'Russell Westbrook' => 'Расселл Уэстбрук',
+    'Stephen Curry' => 'Стефен Карри',
+    'Draymond Green' => 'Дрэймонд Грин',
+    'Jimmy Butler' => 'Джимми Батлер',
+    'Klay Thompson' => 'Клэй Томпсон',
+    'Jonathan Kuminga' => 'Джонатан Куминга',
+    'Brandin Podziemski' => 'Брэндин Подземски',
+    'Andrew Wiggins' => 'Эндрю Уиггинс',
+    'Giannis Antetokounmpo' => 'Яннис Адетокунбо',
+    'Damian Lillard' => 'Дэмиан Лиллард',
+    'Khris Middleton' => 'Крис Миддлтон',
+    'Brook Lopez' => 'Брук Лопес',
+    'Bobby Portis' => 'Бобби Портис',
+    'Joel Embiid' => 'Джоэл Эмбиид',
+    'Tyrese Maxey' => 'Тайриз Макси',
+    'Paul George' => 'Пол Джордж',
+    'Kyle Lowry' => 'Кайл Лаури',
+    'Kelly Oubre Jr.' => 'Келли Убре мл.',
+    'Jayson Tatum' => 'Джейсон Тейтум',
+    'Jaylen Brown' => 'Джейлен Браун',
+    'Kristaps Porzingis' => 'Кристапс Порзингис',
+    'Jrue Holiday' => 'Дрю Холидэй',
+    'Derrick White' => 'Деррик Уайт',
+    'Al Horford' => 'Эл Хорфорд',
+    'Shai Gilgeous-Alexander' => 'Шэй Гилджес-Александер',
+    'Jalen Williams' => 'Джейлен Уильямс',
+    'Chet Holmgren' => 'Чет Холмгрен',
+    'Isaiah Hartenstein' => 'Айзейя Хартенштайн',
+    'Luguentz Dort' => 'Лугенц Дорт',
+    'Cason Wallace' => 'Кейсон Уоллес',
+    'Anthony Edwards' => 'Энтони Эдвардс',
+    'Karl-Anthony Towns' => 'Карл-Энтони Таунс',
+    'Rudy Gobert' => 'Руди Гобер',
+    'Julius Randle' => 'Джулиус Рэндл',
+    'Mike Conley' => 'Майк Конли',
+    'Naz Reid' => 'Наз Рид',
+    'Ja Morant' => 'Джа Морант',
+    'Jaren Jackson Jr.' => 'Джарен Джексон мл.',
+    'Desmond Bane' => 'Десмонд Бэйн',
+    'Zach Edey' => 'Зак Иди',
+    'Marcus Smart' => 'Маркус Смарт',
+    'Kevin Durant' => 'Кевин Дюрант',
+    'Devin Booker' => 'Девин Букер',
+    'Bradley Beal' => 'Брэдли Бил',
+    'Tyus Jones' => 'Тайус Джонс',
+    'Jusuf Nurkic' => 'Юсуф Нуркич',
+    'Kawhi Leonard' => 'Кавай Леонард',
+    'James Harden' => 'Джеймс Харден',
+    'Norman Powell' => 'Норман Пауэлл',
+    'Ivica Zubac' => 'Ивица Зубац',
+    'Fred VanVleet' => 'Фред Ванвлит',
+    'Alperen Sengun' => 'Алперен Шенгюн',
+    'Jalen Green' => 'Джейлен Грин',
+    'Jabari Smith Jr.' => 'Джабари Смит мл.',
+    'Amen Thompson' => 'Амен Томпсон',
+    'Dillon Brooks' => 'Диллон Брукс',
+    'Steven Adams' => 'Стивен Адамс',
+    'Donovan Mitchell' => 'Донован Митчелл',
+    'Darius Garland' => 'Дариус Гарленд',
+    'Evan Mobley' => 'Эван Мобли',
+    'Jarrett Allen' => 'Джарретт Аллен',
+    'Max Strus' => 'Макс Струс',
+    'Thomas Bryant' => 'Томас Брайант',
+    'Jalen Brunson' => 'Джейлен Брансон',
+    'Josh Hart' => 'Джош Харт',
+    'Mikal Bridges' => 'Микал Бриджес',
+    'OG Anunoby' => 'Оу Джи Ануноби',
+    'Mitchell Robinson' => 'Митчелл Робинсон',
+    'Immanuel Quickley' => 'Иммануэль Куикли',
+    'Scottie Barnes' => 'Скотти Барнс',
+    'RJ Barrett' => 'Ар Джей Барретт',
+    'Jakob Poeltl' => 'Якоб Пёлтль',
+    'Trae Young' => 'Трей Янг',
+    'Dyson Daniels' => 'Дайсон Дэниэлс',
+    'Dejounte Murray' => 'Деджонте Мюррей',
+    'Zaccharie Risacher' => 'Заккари Рисаше',
+    'RayJ Dennis' => 'Рэй Джей Деннис',
+    'Victor Wembanyama' => 'Виктор Вембаньяма',
+    'Devin Vassell' => 'Девин Васселл',
+    'Keldon Johnson' => 'Келдон Джонсон',
+    'De\'Aaron Fox' => 'Деарон Фокс',
+    'Domantas Sabonis' => 'Домантас Сабонис',
+    'DeMar DeRozan' => 'Демар Дерозан',
+    'Zach LaVine' => 'Зак Лавин',
+    'Keegan Murray' => 'Киган Мюррей',
+    'Cade Cunningham' => 'Кейд Каннингем',
+    'Ausar Thompson' => 'Озар Томпсон',
+    'Jalen Duren' => 'Джейлен Дюрен',
+    'Paolo Banchero' => 'Паоло Банкеро',
+    'Franz Wagner' => 'Франц Вагнер',
+    'Jalen Suggs' => 'Джейлен Саггс',
+    'LaMelo Ball' => 'Ламело Болл',
+    'Brandon Miller' => 'Брэндон Миллер',
+    'Miles Bridges' => 'Майлз Бриджес',
+    'Zion Williamson' => 'Зайон Уильямсон',
+    'CJ McCollum' => 'Си Джей Макколлум',
+    'Brandon Ingram' => 'Брэндон Ингрэм',
+    'Herbert Jones' => 'Херберт Джонс',
+    'Trey Murphy III' => 'Трей Мёрфи III',
+    'Bam Adebayo' => 'Бэм Адебайо',
+    'Tyler Herro' => 'Тайлер Хирро',
+    'Terry Rozier' => 'Терри Розир',
+    'LaMelo Ball' => 'Ламело Болл',
+    'Anfernee Simons' => 'Энферни Саймонс',
+    'Scoot Henderson' => 'Скут Хендерсон',
+    'Shaedon Sharpe' => 'Шейдон Шарп',
+    'Lauri Markkanen' => 'Лаури Маркканен',
+    'Walker Kessler' => 'Уокер Кесслер',
+    'Jordan Clarkson' => 'Джордан Кларксон',
+    'Jordan Poole' => 'Джордан Пул',
+    'Kyle Kuzma' => 'Кайл Кузма',
+    'Alex Sarr' => 'Алекс Сарр',
 ];
 
 bootstrap();
@@ -114,14 +248,14 @@ try {
         $espnRows = fetchEspnRows();
         logLine('INFO', 'Получено строк из ESPN: ' . count($espnRows));
     } catch (Throwable $e) {
-        logLine('WARN', 'ESPN недоступен: ' . $e->getMessage());
+        logLine('WARN', 'ESPN недоступен или не распарсился: ' . $e->getMessage());
     }
 
     try {
         $cbsRows = fetchCbsRows();
         logLine('INFO', 'Получено строк из CBS: ' . count($cbsRows));
     } catch (Throwable $e) {
-        logLine('WARN', 'CBS недоступен: ' . $e->getMessage());
+        logLine('WARN', 'CBS недоступен или не распарсился: ' . $e->getMessage());
     }
 
     $items = mergeRows($officialRows, $espnRows, $cbsRows);
@@ -361,38 +495,6 @@ function discoverOfficialPdfUrlsDirect(): array
     return $urls;
 }
 
-function buildOfficialPdfUrlFromEt(DateTimeImmutable $dtEt): string
-{
-    $date = $dtEt->format('Y-m-d');
-    $hour12 = $dtEt->format('g');
-    $minute = $dtEt->format('i');
-    $ampm = strtoupper($dtEt->format('A'));
-
-    return sprintf(
-        'https://ak-static.cms.nba.com/referee/injury/Injury-Report_%s_%s_%s%s.pdf',
-        $date,
-        $hour12,
-        $minute,
-        $ampm
-    );
-}
-
-function urlExists(string $url): bool
-{
-    try {
-        $result = request($url, 'HEAD', [
-            'connect_timeout' => 5,
-            'timeout' => 8,
-            'allow_status' => [200],
-            'retries' => 1,
-        ]);
-
-        return ($result['code'] ?? 0) === 200;
-    } catch (Throwable $e) {
-        return false;
-    }
-}
-
 function downloadOfficialPdfBinary(string $url): string
 {
     try {
@@ -487,6 +589,38 @@ function looksLikePdf(string $body): bool
     }
 
     return str_contains(substr($body, 0, 1024), '%PDF');
+}
+
+function buildOfficialPdfUrlFromEt(DateTimeImmutable $dtEt): string
+{
+    $date = $dtEt->format('Y-m-d');
+    $hour12 = $dtEt->format('g');
+    $minute = $dtEt->format('i');
+    $ampm = strtoupper($dtEt->format('A'));
+
+    return sprintf(
+        'https://ak-static.cms.nba.com/referee/injury/Injury-Report_%s_%s_%s%s.pdf',
+        $date,
+        $hour12,
+        $minute,
+        $ampm
+    );
+}
+
+function urlExists(string $url): bool
+{
+    try {
+        $result = request($url, 'HEAD', [
+            'connect_timeout' => 5,
+            'timeout' => 8,
+            'allow_status' => [200],
+            'retries' => 1,
+        ]);
+
+        return ($result['code'] ?? 0) === 200;
+    } catch (Throwable $e) {
+        return false;
+    }
 }
 
 function parseOfficialPdfTimestamp(string $url): int
@@ -633,7 +767,7 @@ function parseEspnLine(string $line, string $team): ?array
     }
 
     $estimatedReturnRaw = '';
-    if (preg_match('/^(Out for season|No timetable|TBD|Day-To-Day|(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2})\b/u', $prefix, $returnMatch)) {
+    if (preg_match('/^(Out for season|No timetable|TBD|Day-To-Day|Game-Time Decision|(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2})\b/u', $prefix, $returnMatch)) {
         $estimatedReturnRaw = trim($returnMatch[1]);
         $prefix = trim(substr($prefix, strlen($estimatedReturnRaw)));
     }
@@ -695,10 +829,18 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
     foreach ($officialRows as $official) {
         $key = buildSourceKey($official['player_name'], $official['team']);
         $secondary = $espnIndex[$key] ?? $cbsIndex[$key] ?? null;
-        $returnSource = isset($espnIndex[$key]) ? 'espn' : (isset($cbsIndex[$key]) ? 'cbs' : 'none');
+        $returnSource = isset($espnIndex[$key]) ? 'espn' : (isset($cbsIndex[$key]) ? 'cbs' : 'fallback');
 
-        $returnInfo = buildReturnInfo($secondary);
+        $playerRu = playerRu((string)$official['player_name']);
+        $reasonInfo = buildReasonRu((string)$official['raw_reason']);
+        $reasonRu = $reasonInfo['reason_ru'];
+        $reasonDetailRu = $reasonInfo['reason_detail_ru'];
+
+        $returnInfo = buildReturnInfo($secondary, (string)$official['raw_status']);
         $commentRu = translateCommentRu((string)($secondary['comment_raw'] ?? ''));
+        if ($commentRu === '') {
+            $commentRu = fallbackCommentRu((string)$official['raw_status'], $reasonRu);
+        }
 
         $items[] = [
             'id' => buildItemId($official['player_name'], $official['team'], $official['report_date']),
@@ -707,15 +849,16 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
             'game_time_et' => $official['game_time_et'],
             'matchup' => $official['matchup'],
             'player' => $official['player_name'],
-            'player_ru' => $official['player_name'],
+            'player_ru' => $playerRu,
             'team' => $official['team'],
             'team_ru' => teamRu($official['team']),
             'raw_status' => $official['raw_status'],
             'raw_reason' => $official['raw_reason'],
             'raw_comment' => (string)($secondary['comment_raw'] ?? ''),
             'status_ru' => translateStatusRu($official['raw_status']),
-            'reason_ru' => translateReasonRu($official['raw_reason']),
-            'comment_ru' => $commentRu !== '' ? $commentRu : 'Без дополнительного комментария',
+            'reason_ru' => $reasonRu,
+            'reason_detail_ru' => $reasonDetailRu,
+            'comment_ru' => $commentRu,
             'estimated_return_date_raw' => $returnInfo['estimated_return_date_raw'],
             'estimated_return_date_ru' => $returnInfo['estimated_return_date_ru'],
             'reevaluation_raw' => $returnInfo['reevaluation_raw'],
@@ -725,12 +868,13 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
             'source_return' => $returnSource,
             'updated_at' => formatMoscowDateTime(),
             'display' => [
-                'player' => $official['player_name'],
+                'player' => $playerRu,
                 'team' => teamRu($official['team']),
                 'status' => translateStatusRu($official['raw_status']),
-                'reason' => translateReasonRu($official['raw_reason']),
+                'reason' => $reasonRu,
+                'reason_detail' => $reasonDetailRu,
                 'return_or_reevaluation' => $returnInfo['return_or_reevaluation_ru'],
-                'comment' => $commentRu !== '' ? $commentRu : 'Без дополнительного комментария',
+                'comment' => $commentRu,
             ],
         ];
     }
@@ -738,20 +882,48 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
     return $items;
 }
 
-function buildReturnInfo(?array $secondary): array
+function buildReturnInfo(?array $secondary, string $rawStatus): array
 {
     $estimatedReturnRaw = trim((string)($secondary['estimated_return_raw'] ?? ''));
     $commentRaw = trim((string)($secondary['comment_raw'] ?? ''));
     $estimatedReturnRu = extractReturnDateRu($estimatedReturnRaw, $commentRaw);
     $reevaluationRu = extractReevaluationRu($commentRaw);
 
+    $fallbackReturn = fallbackReturnRu($rawStatus);
+
     return [
         'estimated_return_date_raw' => $estimatedReturnRaw,
-        'estimated_return_date_ru' => $estimatedReturnRu !== '' ? $estimatedReturnRu : 'Уточняется',
+        'estimated_return_date_ru' => $estimatedReturnRu !== '' ? $estimatedReturnRu : $fallbackReturn,
         'reevaluation_raw' => $reevaluationRu !== '' ? $commentRaw : '',
         'reevaluation_ru' => $reevaluationRu,
-        'return_or_reevaluation_ru' => $reevaluationRu !== '' ? $reevaluationRu : ($estimatedReturnRu !== '' ? $estimatedReturnRu : 'Уточняется'),
+        'return_or_reevaluation_ru' => $reevaluationRu !== '' ? $reevaluationRu : ($estimatedReturnRu !== '' ? $estimatedReturnRu : $fallbackReturn),
     ];
+}
+
+function fallbackReturnRu(string $rawStatus): string
+{
+    return match ($rawStatus) {
+        'Out' => 'Срок возвращения не указан',
+        'Questionable', 'Game-Time Decision' => 'Решение ближе к матчу',
+        'Doubtful' => 'Вероятность участия низкая',
+        'Probable' => 'Ожидается участие',
+        'Available' => 'Готов к игре',
+        default => 'Срок уточняется',
+    };
+}
+
+function fallbackCommentRu(string $rawStatus, string $reasonRu): string
+{
+    $reasonPart = $reasonRu !== '' && $reasonRu !== 'Причина уточняется' ? ' Причина: ' . mb_strtolower($reasonRu, 'UTF-8') . '.' : '';
+
+    return match ($rawStatus) {
+        'Out' => 'Не сыграет по официальному отчёту NBA; конкретный срок возвращения не указан.' . $reasonPart,
+        'Questionable', 'Game-Time Decision' => 'Участие под вопросом; решение ожидается ближе к началу матча.' . $reasonPart,
+        'Doubtful' => 'Вероятность участия низкая.' . $reasonPart,
+        'Probable' => 'Ожидается участие, если не будет ухудшения состояния.' . $reasonPart,
+        'Available' => 'Игрок доступен к матчу.' . $reasonPart,
+        default => 'Дополнительные детали в официальном отчёте NBA не указаны.' . $reasonPart,
+    };
 }
 
 function buildPayload(array $items, int $officialCount, int $espnCount, int $cbsCount, ?string $officialPdfUrl): array
@@ -762,20 +934,23 @@ function buildPayload(array $items, int $officialCount, int $espnCount, int $cbs
         'site_title' => 'Травмы игроков NBA',
         'last_updated' => $updatedAt,
         'status' => 'ok',
-        'source_label' => 'NBA + ESPN',
+        'source_label' => 'NBA + ESPN/CBS',
         'data_state_label' => 'Актуальные данные',
+        'feed_mode_label' => 'В реальном времени',
         'meta' => [
             'timezone' => 'Europe/Moscow',
             'generated_at' => $updatedAt,
-            'schema_version' => '1.0.0',
+            'schema_version' => '1.1.0',
             'primary_status_source' => 'official_nba',
-            'return_source_priority' => ['espn', 'cbs'],
+            'return_source_priority' => ['espn', 'cbs', 'fallback_by_status'],
+            'translation_mode' => 'short_ru_reason_with_player_transliteration_fallback',
             'status_map' => STATUS_MAP_RU,
             'notes' => [
                 'Официальный NBA injury report — основной источник правды для статуса и причины.',
-                'ESPN используется для даты возврата, повторного осмотра и комментария.',
+                'ESPN используется для даты возврата, повторного осмотра и комментария, если данные доступны.',
                 'CBS используется как fallback, если у ESPN нет return info.',
-                'При ошибке обновления последний успешный injuries.json не перезаписывается.',
+                'Если ESPN/CBS недоступны, сроки и комментарии не выдумываются: используется честный fallback по official NBA status.',
+                'Оригинальные поля NBA сохраняются в raw_reason/raw_comment.',
             ],
             'stats' => [
                 'official_pdf_url' => $officialPdfUrl,
@@ -1063,6 +1238,295 @@ function normalizePlayerName(string $name): string
     return trim($name);
 }
 
+function playerRu(string $name): string
+{
+    $normalized = normalizePlayerName($name);
+
+    if (isset(PLAYER_RU_MAP[$normalized])) {
+        return PLAYER_RU_MAP[$normalized];
+    }
+
+    $withoutSuffixNoise = preg_replace('/\s+\(.*?\)$/u', '', $normalized) ?? $normalized;
+    if (isset(PLAYER_RU_MAP[$withoutSuffixNoise])) {
+        return PLAYER_RU_MAP[$withoutSuffixNoise];
+    }
+
+    return transliteratePlayerNameRu($normalized);
+}
+
+function transliteratePlayerNameRu(string $name): string
+{
+    $manualWords = [
+        'AJ' => 'Эй Джей', 'CJ' => 'Си Джей', 'DJ' => 'Ди Джей', 'PJ' => 'Пи Джей', 'RJ' => 'Ар Джей', 'TJ' => 'Ти Джей',
+        'Jr.' => 'мл.', 'Jr' => 'мл.', 'Sr.' => 'ст.', 'Sr' => 'ст.',
+        'II' => 'II', 'III' => 'III', 'IV' => 'IV',
+        'Jalen' => 'Джейлен', 'Jaylen' => 'Джейлен', 'Jaden' => 'Джейден', 'Jabari' => 'Джабари', 'Jaime' => 'Хайме',
+        'Jordan' => 'Джордан', 'Josh' => 'Джош', 'Jonathan' => 'Джонатан', 'John' => 'Джон', 'Johnny' => 'Джонни',
+        'Anthony' => 'Энтони', 'Kevin' => 'Кевин', 'Devin' => 'Девин', 'Damian' => 'Дэмиан', 'Donovan' => 'Донован',
+        'Tyrese' => 'Тайриз', 'Tyler' => 'Тайлер', 'Trey' => 'Трей', 'Trae' => 'Трей', 'Tre' => 'Тре',
+        'Isaiah' => 'Айзейя', 'Immanuel' => 'Иммануэль', 'Austin' => 'Остин', 'Victor' => 'Виктор',
+        'Fred' => 'Фред', 'Luka' => 'Лука', 'Nikola' => 'Никола', 'Giannis' => 'Яннис', 'Joel' => 'Джоэл',
+        'Stephen' => 'Стефен', 'Steven' => 'Стивен', 'LeBron' => 'Леброн', 'Kawhi' => 'Кавай', 'James' => 'Джеймс',
+        'Paul' => 'Пол', 'George' => 'Джордж', 'Michael' => 'Майкл', 'Mark' => 'Марк', 'Marcus' => 'Маркус',
+        'RayJ' => 'Рэй Джей', 'Norman' => 'Норман', 'Russell' => 'Расселл', 'Chet' => 'Чет', 'Bam' => 'Бэм',
+        'Zion' => 'Зайон', 'Scottie' => 'Скотти', 'Darius' => 'Дариус', 'Derrick' => 'Деррик', 'Dillon' => 'Диллон',
+        'Max' => 'Макс', 'Maxi' => 'Макси', 'Kyle' => 'Кайл', 'Kelly' => 'Келли', 'Rudy' => 'Руди', 'Rui' => 'Руи',
+    ];
+
+    $parts = preg_split('/([\s\-\.\']+)/u', $name, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY);
+    if (!is_array($parts)) {
+        return simpleLatinToCyrillic($name);
+    }
+
+    $out = '';
+    foreach ($parts as $part) {
+        if (preg_match('/^[\s\-\.\']+$/u', $part)) {
+            $out .= str_replace("'", '', $part);
+            continue;
+        }
+
+        if (isset($manualWords[$part])) {
+            $out .= $manualWords[$part];
+            continue;
+        }
+
+        $out .= simpleLatinToCyrillic($part);
+    }
+
+    $out = preg_replace('/\s+/u', ' ', $out) ?? $out;
+    $out = trim($out, " \t\n\r\0\x0B-.");
+
+    return $out !== '' ? $out : $name;
+}
+
+function simpleLatinToCyrillic(string $word): string
+{
+    $original = $word;
+    $word = mb_strtolower($word, 'UTF-8');
+
+    $rules = [
+        'sch' => 'ш', 'sh' => 'ш', 'ch' => 'ч', 'tch' => 'ч', 'zh' => 'ж', 'ph' => 'ф', 'th' => 'т',
+        'ck' => 'к', 'qu' => 'кв', 'wh' => 'в', 'wr' => 'р', 'kn' => 'н',
+        'ee' => 'и', 'ea' => 'и', 'oo' => 'у', 'ou' => 'ау', 'ow' => 'оу',
+        'ay' => 'эй', 'ai' => 'эй', 'ey' => 'и', 'ei' => 'эй', 'ie' => 'и',
+        'ya' => 'я', 'yo' => 'йо', 'yu' => 'ю', 'ye' => 'е',
+        'j' => 'дж', 'x' => 'кс', 'w' => 'у',
+        'a' => 'а', 'b' => 'б', 'c' => 'к', 'd' => 'д', 'e' => 'е', 'f' => 'ф', 'g' => 'г', 'h' => 'х',
+        'i' => 'и', 'k' => 'к', 'l' => 'л', 'm' => 'м', 'n' => 'н', 'o' => 'о', 'p' => 'п', 'q' => 'к',
+        'r' => 'р', 's' => 'с', 't' => 'т', 'u' => 'у', 'v' => 'в', 'y' => 'и', 'z' => 'з',
+    ];
+
+    $result = strtr($word, $rules);
+    $result = preg_replace('/[^а-яё0-9]+/u', '', $result) ?? $result;
+
+    if ($result === '') {
+        return $original;
+    }
+
+    return upperFirst($result);
+}
+
+function buildReasonRu(string $reason): array
+{
+    $raw = trim($reason);
+    if ($raw === '' || $raw === '-') {
+        return ['reason_ru' => 'Причина уточняется', 'reason_detail_ru' => ''];
+    }
+
+    $text = cleanupOfficialReasonText($raw);
+    $lowerRaw = mb_strtolower($raw, 'UTF-8');
+    $lower = mb_strtolower($text, 'UTF-8');
+
+    if (str_contains($lowerRaw, 'not with team')) {
+        if (str_contains($lowerRaw, 'personal')) {
+            return ['reason_ru' => 'Вне расположения команды: личные причины', 'reason_detail_ru' => ''];
+        }
+        return ['reason_ru' => 'Вне расположения команды', 'reason_detail_ru' => ''];
+    }
+
+    if (str_contains($lowerRaw, 'g league')) {
+        if (str_contains($lowerRaw, 'two-way')) {
+            return ['reason_ru' => 'G League: двусторонний контракт', 'reason_detail_ru' => ''];
+        }
+        if (str_contains($lowerRaw, 'on assignment')) {
+            return ['reason_ru' => 'G League: командирован', 'reason_detail_ru' => ''];
+        }
+        return ['reason_ru' => 'G League', 'reason_detail_ru' => ''];
+    }
+
+    if (containsAny($lower, ['illness', 'non-covid illness', 'sick'])) {
+        return ['reason_ru' => 'Болезнь', 'reason_detail_ru' => ''];
+    }
+
+    if (containsAny($lower, ['personal'])) {
+        return ['reason_ru' => 'Личные причины', 'reason_detail_ru' => ''];
+    }
+
+    if (containsAny($lower, ['rest'])) {
+        return ['reason_ru' => 'Отдых', 'reason_detail_ru' => ''];
+    }
+
+    if (containsAny($lower, ['injury management', 'maintenance', 'load management'])) {
+        return ['reason_ru' => 'Контроль нагрузки', 'reason_detail_ru' => ''];
+    }
+
+    if (containsAny($lower, ['return to competition reconditioning', 'reconditioning'])) {
+        return ['reason_ru' => 'Набор игровых кондиций', 'reason_detail_ru' => ''];
+    }
+
+    if (containsAny($lower, ['concussion'])) {
+        return ['reason_ru' => 'Сотрясение', 'reason_detail_ru' => ''];
+    }
+
+    $body = findBodyPartInfo($lower);
+    $side = findSideInfo($lowerRaw);
+    $detail = findInjuryDetailRu($lowerRaw);
+
+    if ($body !== null) {
+        $reasonRu = buildBodyReasonPhrase($body, $side);
+        return ['reason_ru' => $reasonRu, 'reason_detail_ru' => $detail];
+    }
+
+    if ($detail !== '') {
+        return ['reason_ru' => upperFirst($detail), 'reason_detail_ru' => $detail];
+    }
+
+    return ['reason_ru' => 'Причина уточняется', 'reason_detail_ru' => ''];
+}
+
+function cleanupOfficialReasonText(string $reason): string
+{
+    $reason = trim($reason);
+    $reason = preg_replace('/^Injury\/Illness\s*-\s*/i', '', $reason) ?? $reason;
+    $reason = preg_replace('/^Illness\s*-\s*/i', '', $reason) ?? $reason;
+    $reason = preg_replace('/^Not With Team\s*-\s*/i', '', $reason) ?? $reason;
+    $reason = preg_replace('/\s*;\s*/u', '; ', $reason) ?? $reason;
+    $reason = preg_replace('/\s+/u', ' ', $reason) ?? $reason;
+    return trim($reason, " -—;\t\n\r\0\x0B");
+}
+
+function findSideInfo(string $lower): ?string
+{
+    if (preg_match('/\bleft\b/i', $lower)) {
+        return 'left';
+    }
+    if (preg_match('/\bright\b/i', $lower)) {
+        return 'right';
+    }
+    if (preg_match('/\bbilateral\b/i', $lower)) {
+        return 'bilateral';
+    }
+    return null;
+}
+
+function findBodyPartInfo(string $lower): ?array
+{
+    $map = [
+        ['keys' => ['hamstring'], 'genitive' => 'подколенного сухожилия', 'gender' => 'n'],
+        ['keys' => ['knee'], 'genitive' => 'колена', 'gender' => 'n'],
+        ['keys' => ['ankle', 'high ankle'], 'genitive' => 'голеностопа', 'gender' => 'm'],
+        ['keys' => ['foot'], 'genitive' => 'стопы', 'gender' => 'f'],
+        ['keys' => ['toe'], 'genitive' => 'пальца ноги', 'gender' => 'm'],
+        ['keys' => ['calf'], 'genitive' => 'икроножной мышцы', 'gender' => 'f'],
+        ['keys' => ['groin'], 'genitive' => 'паха', 'gender' => 'm'],
+        ['keys' => ['hip'], 'genitive' => 'бедра', 'gender' => 'n'],
+        ['keys' => ['back'], 'genitive' => 'спины', 'gender' => 'f'],
+        ['keys' => ['lower back'], 'genitive' => 'поясницы', 'gender' => 'f'],
+        ['keys' => ['shoulder'], 'genitive' => 'плеча', 'gender' => 'n'],
+        ['keys' => ['elbow'], 'genitive' => 'локтя', 'gender' => 'm'],
+        ['keys' => ['wrist'], 'genitive' => 'запястья', 'gender' => 'n'],
+        ['keys' => ['hand'], 'genitive' => 'кисти', 'gender' => 'f'],
+        ['keys' => ['finger'], 'genitive' => 'пальца руки', 'gender' => 'm'],
+        ['keys' => ['thumb'], 'genitive' => 'большого пальца руки', 'gender' => 'm'],
+        ['keys' => ['neck'], 'genitive' => 'шеи', 'gender' => 'f'],
+        ['keys' => ['achilles'], 'genitive' => 'ахилла', 'gender' => 'm'],
+        ['keys' => ['rib', 'ribs'], 'genitive' => 'рёбер', 'gender' => 'pl'],
+        ['keys' => ['oblique'], 'genitive' => 'косой мышцы корпуса', 'gender' => 'f'],
+        ['keys' => ['adductor'], 'genitive' => 'приводящей мышцы', 'gender' => 'f'],
+        ['keys' => ['quad', 'quadriceps'], 'genitive' => 'четырёхглавой мышцы бедра', 'gender' => 'f'],
+        ['keys' => ['face'], 'genitive' => 'лица', 'gender' => 'n'],
+        ['keys' => ['nose'], 'genitive' => 'носа', 'gender' => 'm'],
+        ['keys' => ['eye'], 'genitive' => 'глаза', 'gender' => 'm'],
+        ['keys' => ['head'], 'genitive' => 'головы', 'gender' => 'f'],
+        ['keys' => ['core'], 'genitive' => 'мышц корпуса', 'gender' => 'pl'],
+    ];
+
+    foreach ($map as $info) {
+        foreach ($info['keys'] as $key) {
+            if (preg_match('/\b' . preg_quote($key, '/') . '\b/i', $lower)) {
+                return $info;
+            }
+        }
+    }
+
+    return null;
+}
+
+function buildBodyReasonPhrase(array $body, ?string $side): string
+{
+    $genitive = (string)$body['genitive'];
+    $gender = (string)$body['gender'];
+
+    if ($side === 'bilateral') {
+        return 'Травма обеих сторон: ' . $genitive;
+    }
+
+    if ($side === null || $gender === 'pl') {
+        return 'Травма ' . $genitive;
+    }
+
+    $sideWord = match ($side . ':' . $gender) {
+        'left:m', 'left:n' => 'левого',
+        'left:f' => 'левой',
+        'right:m', 'right:n' => 'правого',
+        'right:f' => 'правой',
+        default => '',
+    };
+
+    return trim('Травма ' . $sideWord . ' ' . $genitive);
+}
+
+function findInjuryDetailRu(string $lower): string
+{
+    $detailMap = [
+        'surgery' => 'после операции',
+        'fracture' => 'перелом',
+        'broken' => 'перелом',
+        'sprain' => 'растяжение связок',
+        'strain' => 'растяжение мышцы',
+        'contusion' => 'ушиб',
+        'bruise' => 'ушиб',
+        'soreness' => 'болезненность',
+        'pain' => 'боль',
+        'tightness' => 'зажатость',
+        'inflammation' => 'воспаление',
+        'tendinitis' => 'воспаление сухожилия',
+        'tendonitis' => 'воспаление сухожилия',
+        'dislocation' => 'вывих',
+        'laceration' => 'рассечение',
+        'tear' => 'повреждение',
+        'muscle' => 'мышечная травма',
+    ];
+
+    foreach ($detailMap as $key => $value) {
+        if (preg_match('/\b' . preg_quote($key, '/') . '\b/i', $lower)) {
+            return $value;
+        }
+    }
+
+    return '';
+}
+
+function containsAny(string $haystack, array $needles): bool
+{
+    foreach ($needles as $needle) {
+        if (str_contains($haystack, mb_strtolower($needle, 'UTF-8'))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 function canonicalTeam(string $team): string
 {
     return TEAM_ALIASES[$team] ?? $team;
@@ -1080,63 +1544,7 @@ function translateStatusRu(string $status): string
 
 function translateReasonRu(string $reason): string
 {
-    $reason = trim($reason);
-
-    if ($reason === '' || $reason === '-') {
-        return 'Причина уточняется';
-    }
-
-    $map = [
-        'Injury/Illness - ' => '',
-        'Illness - ' => 'Болезнь — ',
-        'Not With Team - ' => 'Вне расположения команды — ',
-        'G League - Two-Way' => 'G League — двусторонний контракт',
-        'G League - On Assignment' => 'G League — командирован',
-        'Return To Competition Reconditioning' => 'Набор кондиций после возвращения',
-        'Injury Management' => 'контроль нагрузки',
-        'Maintenance' => 'контроль нагрузки',
-        'Soreness' => 'болезненность',
-        'Surgery' => 'после операции',
-        'Contusion' => 'ушиб',
-        'Strain' => 'растяжение',
-        'Sprain' => 'растяжение',
-        'Hamstring' => 'подколенное сухожилие',
-        'Calf' => 'икра',
-        'Knee' => 'колено',
-        'Ankle' => 'голеностоп',
-        'High Ankle' => 'верхний голеностоп',
-        'Foot' => 'стопа',
-        'Toe' => 'палец ноги',
-        'Back' => 'спина',
-        'Hip' => 'бедро',
-        'Groin' => 'пах',
-        'Oblique' => 'косая мышца корпуса',
-        'Achilles' => 'ахилл',
-        'Wrist' => 'запястье',
-        'Finger' => 'палец',
-        'Thumb' => 'большой палец',
-        'Hand' => 'кисть',
-        'Shoulder' => 'плечо',
-        'Elbow' => 'локоть',
-        'Neck' => 'шея',
-        'Ribs' => 'рёбра',
-        'Personal' => 'личные причины',
-        'Rest' => 'отдых',
-        'Right' => 'Правое',
-        'Left' => 'Левое',
-    ];
-
-    uksort($map, static fn(string $a, string $b): int => mb_strlen($b, 'UTF-8') <=> mb_strlen($a, 'UTF-8'));
-
-    foreach ($map as $en => $ru) {
-        $reason = str_ireplace($en, $ru, $reason);
-    }
-
-    $reason = preg_replace('/\s*;\s*/u', '; ', $reason) ?? $reason;
-    $reason = preg_replace('/\s{2,}/u', ' ', $reason) ?? $reason;
-    $reason = trim($reason, " -—;");
-
-    return upperFirst($reason);
+    return buildReasonRu($reason)['reason_ru'];
 }
 
 function translateCommentRu(string $comment): string
@@ -1150,6 +1558,7 @@ function translateCommentRu(string $comment): string
     $patterns = [
         '/Will be re-evaluated in one week/i' => 'Повторный осмотр через 1 неделю',
         '/Will be re-evaluated in two weeks/i' => 'Повторный осмотр через 2 недели',
+        '/will be re-evaluated/i' => 'Планируется повторный осмотр',
         '/expected to miss at least one week/i' => 'Ожидается пропуск как минимум одной недели',
         '/expected to miss at least two weeks/i' => 'Ожидается пропуск как минимум двух недель',
         '/is questionable for/i' => 'Участие под вопросом',
@@ -1157,8 +1566,10 @@ function translateCommentRu(string $comment): string
         '/doubtful for/i' => 'Скорее не сыграет',
         '/probable for/i' => 'Скорее сыграет',
         '/expected to play/i' => 'Ожидается участие',
-        '/available for/i' => 'Ожидается участие',
+        '/available for/i' => 'Игрок доступен к матчу',
         '/has been ruled out/i' => 'Не сыграет',
+        '/will not play/i' => 'Не сыграет',
+        '/out for/i' => 'Не сыграет',
     ];
 
     foreach ($patterns as $pattern => $replacement) {
@@ -1173,12 +1584,28 @@ function translateCommentRu(string $comment): string
         return $dateRu !== '' ? 'Ожидается отсутствие как минимум до ' . $dateRu : 'Срок возвращения уточняется';
     }
 
-    return 'Дополнительные детали доступны в raw_comment';
+    return '';
 }
 
 function extractReturnDateRu(string $estimatedReturnRaw, string $commentRaw): string
 {
+    $estimatedReturnRaw = trim($estimatedReturnRaw);
+
     if ($estimatedReturnRaw !== '') {
+        $lower = mb_strtolower($estimatedReturnRaw, 'UTF-8');
+        if ($lower === 'out for season') {
+            return 'До конца сезона';
+        }
+        if ($lower === 'no timetable' || $lower === 'tbd') {
+            return 'Срок не указан';
+        }
+        if ($lower === 'day-to-day') {
+            return 'Состояние оценивается ежедневно';
+        }
+        if ($lower === 'game-time decision') {
+            return 'Решение в день матча';
+        }
+
         $dateRu = monthDayToRu($estimatedReturnRaw);
         if ($dateRu !== '') {
             return $dateRu;
@@ -1203,6 +1630,10 @@ function extractReevaluationRu(string $commentRaw): string
 
     if (preg_match('/re-evaluated in two weeks/i', $commentRaw)) {
         return 'Повторный осмотр через 2 недели';
+    }
+
+    if (preg_match('/re-evaluated/i', $commentRaw)) {
+        return 'Планируется повторный осмотр';
     }
 
     return '';
@@ -1267,13 +1698,13 @@ function dedupeByKey(array $rows, callable $callback): array
 function slugify(string $value): string
 {
     $value = mb_strtolower(trim($value), 'UTF-8');
-    $value = transliterate($value);
+    $value = transliterateForSlug($value);
     $value = preg_replace('/[^a-z0-9]+/u', '-', $value) ?? $value;
 
     return trim($value, '-');
 }
 
-function transliterate(string $value): string
+function transliterateForSlug(string $value): string
 {
     return strtr($value, [
         'а' => 'a', 'б' => 'b', 'в' => 'v', 'г' => 'g', 'д' => 'd', 'е' => 'e', 'ё' => 'e', 'ж' => 'zh', 'з' => 'z', 'и' => 'i', 'й' => 'y',
