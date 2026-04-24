@@ -8,7 +8,13 @@ const DATA_DIR = ROOT_DIR . '/data';
 const LOG_DIR = ROOT_DIR . '/logs';
 const DATA_FILE = DATA_DIR . '/injuries.json';
 const LOG_FILE = LOG_DIR . '/update_injuries.log';
-const USER_AGENT = 'Mozilla/5.0 (compatible; AANBA-InjuriesBot/1.3; +https://aanba.info/)';
+
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+
+const OFFICIAL_REPORT_PAGE = 'https://official.nba.com/nba-injury-report-2025-26-season/';
+const PDF_CONNECT_TIMEOUT = 30;
+const PDF_DOWNLOAD_TIMEOUT = 120;
+const PDF_CANDIDATES_TO_TRY = 5;
 
 const STATUS_MAP_RU = [
     'Out' => 'Не сыграет',
@@ -129,10 +135,12 @@ try {
         if ($orderA !== $orderB) {
             return $orderA <=> $orderB;
         }
+
         $teamCompare = strcmp((string)($a['team_ru'] ?? ''), (string)($b['team_ru'] ?? ''));
         if ($teamCompare !== 0) {
             return $teamCompare;
         }
+
         return strcmp((string)($a['player_ru'] ?? ''), (string)($b['player_ru'] ?? ''));
     });
 
@@ -140,6 +148,7 @@ try {
     writeJsonAtomic(DATA_FILE, $payload);
 
     logLine('INFO', 'injuries.json обновлён. Записей: ' . count($items));
+
     respond(true, 'injuries.json успешно обновлён', [
         'last_updated' => $payload['last_updated'],
         'records' => count($items),
@@ -147,6 +156,7 @@ try {
     ]);
 } catch (Throwable $e) {
     logLine('ERROR', $e->getMessage());
+
     respond(false, $e->getMessage(), [
         'last_successful_json_kept' => is_file(DATA_FILE),
     ], 500);
@@ -166,6 +176,7 @@ function ensureDirectories(): void
             throw new RuntimeException('Не удалось создать директорию: ' . $dir);
         }
     }
+
     if (!file_exists(LOG_FILE)) {
         @file_put_contents(LOG_FILE, '');
     }
@@ -205,24 +216,42 @@ function respond(bool $ok, string $message, array $extra = [], int $statusCode =
 
 function fetchOfficialNbaRows(): array
 {
-    $pdfUrl = discoverLatestOfficialPdfUrlDirect();
-    if ($pdfUrl === '') {
-        throw new RuntimeException('Не удалось найти свежий официальный injury report PDF NBA на странице official.nba.com.');
-    }
-    setOfficialPdfUrl($pdfUrl);
-
-    logLine('INFO', 'Скачиваю официальный PDF NBA: ' . $pdfUrl);
-    $pdfBinary = httpGetBinary($pdfUrl);
-    logLine('INFO', 'PDF скачан. Размер: ' . strlen($pdfBinary) . ' байт. Извлекаю текст.');
-
-    $pdfText = extractPdfText($pdfBinary);
-    if ($pdfText === '') {
-        throw new RuntimeException('Не удалось извлечь текст из официального PDF-отчёта NBA.');
+    $pdfUrls = discoverOfficialPdfUrlsDirect();
+    if ($pdfUrls === []) {
+        throw new RuntimeException('Не удалось найти свежие официальные injury report PDF NBA на странице official.nba.com.');
     }
 
-    $rows = parseOfficialPdfText($pdfText);
-    logLine('INFO', 'Получено строк из official NBA: ' . count($rows) . '. PDF: ' . $pdfUrl);
-    return $rows;
+    $lastError = '';
+
+    foreach (array_slice($pdfUrls, 0, PDF_CANDIDATES_TO_TRY) as $index => $pdfUrl) {
+        try {
+            $humanIndex = $index + 1;
+            logLine('INFO', 'Пробую официальный PDF NBA #' . $humanIndex . ': ' . $pdfUrl);
+
+            setOfficialPdfUrl($pdfUrl);
+
+            $pdfBinary = downloadOfficialPdfBinary($pdfUrl);
+            logLine('INFO', 'PDF скачан. Размер: ' . strlen($pdfBinary) . ' байт. Извлекаю текст.');
+
+            $pdfText = extractPdfText($pdfBinary);
+            if ($pdfText === '') {
+                throw new RuntimeException('Не удалось извлечь текст из PDF.');
+            }
+
+            $rows = parseOfficialPdfText($pdfText);
+            if ($rows === []) {
+                throw new RuntimeException('PDF распознан, но parser не получил ни одной строки.');
+            }
+
+            logLine('INFO', 'Получено строк из official NBA: ' . count($rows) . '. PDF: ' . $pdfUrl);
+            return $rows;
+        } catch (Throwable $e) {
+            $lastError = $e->getMessage();
+            logLine('WARN', 'Не удалось обработать PDF ' . $pdfUrl . ': ' . $lastError);
+        }
+    }
+
+    throw new RuntimeException('Не удалось скачать/распарсить ни один официальный PDF NBA. Последняя ошибка: ' . $lastError);
 }
 
 function fetchEspnRows(): array
@@ -237,12 +266,15 @@ function fetchEspnRows(): array
             $currentTeam = canonicalTeam($line);
             continue;
         }
+
         if ($currentTeam === null) {
             continue;
         }
+
         if ($line === 'NAME POS EST. RETURN DATE STATUS COMMENT' || $line === 'NAME POS RETURN DATE STATUS COMMENT') {
             continue;
         }
+
         $parsed = parseEspnLine($line, $currentTeam);
         if ($parsed !== null) {
             $rows[] = $parsed;
@@ -264,12 +296,15 @@ function fetchCbsRows(): array
             $currentTeam = canonicalTeam($line);
             continue;
         }
+
         if ($currentTeam === null) {
             continue;
         }
+
         if (str_contains($line, 'Player Position Updated Injury Injury Status')) {
             continue;
         }
+
         $parsed = parseCbsLine($line, $currentTeam);
         if ($parsed !== null) {
             $rows[] = $parsed;
@@ -281,14 +316,19 @@ function fetchCbsRows(): array
 
 function discoverLatestOfficialPdfUrlDirect(): string
 {
-    $pageUrl = 'https://official.nba.com/nba-injury-report-2025-26-season/';
-    logLine('INFO', 'Ищу последний PDF NBA injury report на официальной странице: ' . $pageUrl);
+    $urls = discoverOfficialPdfUrlsDirect();
+    return $urls[0] ?? '';
+}
+
+function discoverOfficialPdfUrlsDirect(): array
+{
+    logLine('INFO', 'Ищу PDF NBA injury report на официальной странице: ' . OFFICIAL_REPORT_PAGE);
 
     try {
-        $html = httpGet($pageUrl);
+        $html = httpGet(OFFICIAL_REPORT_PAGE);
     } catch (Throwable $e) {
         logLine('WARN', 'Не удалось открыть страницу NBA injury reports: ' . $e->getMessage());
-        return '';
+        return [];
     }
 
     $urls = [];
@@ -296,7 +336,7 @@ function discoverLatestOfficialPdfUrlDirect(): string
     if (preg_match_all('/href=["\']([^"\']*Injury-Report_\d{4}-\d{2}-\d{2}_\d{1,2}_\d{2}(?:AM|PM)\.pdf[^"\']*)["\']/i', $html, $matches)) {
         foreach ($matches[1] as $href) {
             $url = html_entity_decode((string)$href, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-            $url = absolutizeUrl($url, $pageUrl);
+            $url = absolutizeUrl($url, OFFICIAL_REPORT_PAGE);
             $url = preg_replace('/\.pdf.*$/i', '.pdf', $url) ?? $url;
 
             if (parseOfficialPdfTimestamp($url) > 0) {
@@ -305,21 +345,20 @@ function discoverLatestOfficialPdfUrlDirect(): string
         }
     }
 
+    $urls = array_values(array_unique($urls));
+
     if ($urls === []) {
         logLine('WARN', 'На официальной странице NBA не найдено PDF-ссылок Injury-Report.');
-        return '';
+        return [];
     }
-
-    $urls = array_values(array_unique($urls));
 
     usort($urls, static function (string $a, string $b): int {
         return parseOfficialPdfTimestamp($b) <=> parseOfficialPdfTimestamp($a);
     });
 
-    $latestUrl = $urls[0];
-    logLine('INFO', 'Найден последний официальный PDF NBA: ' . $latestUrl);
+    logLine('INFO', 'Найдено официальных PDF NBA: ' . count($urls) . '. Самый свежий: ' . $urls[0]);
 
-    return $latestUrl;
+    return $urls;
 }
 
 function buildOfficialPdfUrlFromEt(DateTimeImmutable $dtEt): string
@@ -328,6 +367,7 @@ function buildOfficialPdfUrlFromEt(DateTimeImmutable $dtEt): string
     $hour12 = $dtEt->format('g');
     $minute = $dtEt->format('i');
     $ampm = strtoupper($dtEt->format('A'));
+
     return sprintf(
         'https://ak-static.cms.nba.com/referee/injury/Injury-Report_%s_%s_%s%s.pdf',
         $date,
@@ -346,10 +386,107 @@ function urlExists(string $url): bool
             'allow_status' => [200],
             'retries' => 1,
         ]);
+
         return ($result['code'] ?? 0) === 200;
     } catch (Throwable $e) {
         return false;
     }
+}
+
+function downloadOfficialPdfBinary(string $url): string
+{
+    try {
+        logLine('INFO', 'Пробую скачать PDF через PHP cURL. Timeout: ' . PDF_DOWNLOAD_TIMEOUT . ' сек.');
+
+        $result = request($url, 'GET', [
+            'connect_timeout' => PDF_CONNECT_TIMEOUT,
+            'timeout' => PDF_DOWNLOAD_TIMEOUT,
+            'retries' => 1,
+            'headers' => [
+                'Referer: ' . OFFICIAL_REPORT_PAGE,
+                'Accept: application/pdf,application/octet-stream,*/*;q=0.8',
+            ],
+        ]);
+
+        $body = (string)($result['body'] ?? '');
+
+        if (looksLikePdf($body)) {
+            return $body;
+        }
+
+        logLine('WARN', 'PHP cURL получил ответ, но это не похоже на PDF. Размер ответа: ' . strlen($body) . ' байт. Пробую fallback через системный curl.');
+    } catch (Throwable $e) {
+        logLine('WARN', 'PHP cURL не скачал PDF: ' . $e->getMessage() . '. Пробую fallback через системный curl.');
+    }
+
+    $fallback = downloadWithSystemCurl($url);
+    if (looksLikePdf($fallback)) {
+        return $fallback;
+    }
+
+    throw new RuntimeException('Не удалось скачать официальный PDF NBA даже через fallback curl: ' . $url);
+}
+
+function downloadWithSystemCurl(string $url): string
+{
+    if (!function_exists('shell_exec')) {
+        logLine('WARN', 'shell_exec недоступен, fallback через системный curl невозможен.');
+        return '';
+    }
+
+    $tmp = tempnam(sys_get_temp_dir(), 'nba_pdf_');
+    if ($tmp === false) {
+        logLine('WARN', 'Не удалось создать временный файл для PDF.');
+        return '';
+    }
+
+    $cmd = implode(' ', [
+        'curl',
+        '--location',
+        '--fail',
+        '--silent',
+        '--show-error',
+        '--compressed',
+        '--ipv4',
+        '--connect-timeout', (string)PDF_CONNECT_TIMEOUT,
+        '--max-time', (string)PDF_DOWNLOAD_TIMEOUT,
+        '--retry', '2',
+        '--retry-delay', '2',
+        '--user-agent', escapeshellarg(USER_AGENT),
+        '--header', escapeshellarg('Referer: ' . OFFICIAL_REPORT_PAGE),
+        '--header', escapeshellarg('Accept: application/pdf,application/octet-stream,*/*;q=0.8'),
+        '--output', escapeshellarg($tmp),
+        escapeshellarg($url),
+        '2>&1',
+    ]);
+
+    logLine('INFO', 'Пробую скачать PDF через системный curl. Timeout: ' . PDF_DOWNLOAD_TIMEOUT . ' сек.');
+    $output = (string)@shell_exec($cmd);
+
+    if (!is_file($tmp) || filesize($tmp) === 0) {
+        @unlink($tmp);
+        logLine('WARN', 'Системный curl не скачал PDF. Ответ curl: ' . trim($output));
+        return '';
+    }
+
+    $body = (string)file_get_contents($tmp);
+    @unlink($tmp);
+
+    if (!looksLikePdf($body)) {
+        logLine('WARN', 'Системный curl скачал ответ, но это не PDF. Размер: ' . strlen($body) . ' байт. Ответ curl: ' . trim($output));
+        return '';
+    }
+
+    return $body;
+}
+
+function looksLikePdf(string $body): bool
+{
+    if (strlen($body) < 1000) {
+        return false;
+    }
+
+    return str_contains(substr($body, 0, 1024), '%PDF');
 }
 
 function parseOfficialPdfTimestamp(string $url): int
@@ -365,6 +502,7 @@ function parseOfficialPdfTimestamp(string $url): int
     if ($period === 'PM' && $hour < 12) {
         $hour += 12;
     }
+
     if ($period === 'AM' && $hour === 12) {
         $hour = 0;
     }
@@ -412,18 +550,23 @@ function parseOfficialPdfText(string $text): array
         if (preg_match('/^\d{2}\/\d{2}\/\d{4}$/', $parts[0] ?? '')) {
             $currentGameDate = array_shift($parts);
         }
+
         if (preg_match('/^\d{2}:\d{2}\s+\(ET\)$/', $parts[0] ?? '')) {
             $currentGameTime = array_shift($parts);
         }
+
         if (preg_match('/^[A-Z]{2,3}@[A-Z]{2,3}$/', $parts[0] ?? '')) {
             $currentMatchup = array_shift($parts);
         }
+
         if (isset(TEAM_ALIASES[$parts[0] ?? ''])) {
             $currentTeam = canonicalTeam((string)array_shift($parts));
         }
+
         if (($parts[0] ?? '') === 'NOT YET SUBMITTED') {
             continue;
         }
+
         if ($parts === []) {
             continue;
         }
@@ -476,6 +619,7 @@ function parseEspnLine(string $line, string $team): ?array
 
     $playerName = normalizePlayerName(trim($m['name']));
     $rest = trim($m['rest']);
+
     if ($playerName === '' || $rest === '') {
         return null;
     }
@@ -547,6 +691,7 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
     }
 
     $items = [];
+
     foreach ($officialRows as $official) {
         $key = buildSourceKey($official['player_name'], $official['team']);
         $secondary = $espnIndex[$key] ?? $cbsIndex[$key] ?? null;
@@ -651,6 +796,7 @@ function writeJsonAtomic(string $path, array $payload): void
     }
 
     $tmpPath = $path . '.tmp';
+
     if (file_put_contents($tmpPath, $json) === false) {
         throw new RuntimeException('Не удалось записать временный JSON-файл.');
     }
@@ -668,7 +814,7 @@ function httpGet(string $url): string
 
 function httpGetBinary(string $url): string
 {
-    return request($url)['body'];
+    return downloadOfficialPdfBinary($url);
 }
 
 function request(string $url, string $method = 'GET', array $options = []): array
@@ -687,12 +833,13 @@ function request(string $url, string $method = 'GET', array $options = []): arra
 
         if (function_exists('curl_init')) {
             $ch = curl_init($url);
-            $headers = [
+
+            $headers = array_merge([
                 'Accept: text/html,application/pdf,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language: en-US,en;q=0.9,ru;q=0.8',
                 'Cache-Control: no-cache',
                 'Pragma: no-cache',
-            ];
+            ], $options['headers'] ?? []);
 
             curl_setopt_array($ch, [
                 CURLOPT_RETURNTRANSFER => true,
@@ -707,6 +854,7 @@ function request(string $url, string $method = 'GET', array $options = []): arra
                 CURLOPT_CUSTOMREQUEST => $method,
                 CURLOPT_NOBODY => $method === 'HEAD',
                 CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+                CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
             ]);
 
             $body = curl_exec($ch);
@@ -796,6 +944,7 @@ function extractPdfTextPurePhp(string $binary): string
     }
 
     $text = '';
+
     foreach ($matches[1] as $stream) {
         $decoded = tryInflate($stream);
         if ($decoded === '') {
@@ -853,6 +1002,7 @@ function normalizeHtmlToLines(string $html): array
 {
     $html = preg_replace('/<script\b[^>]*>.*?<\/script>/is', ' ', $html) ?? $html;
     $html = preg_replace('/<style\b[^>]*>.*?<\/style>/is', ' ', $html) ?? $html;
+
     $html = str_replace(
         ['<br>', '<br/>', '<br />', '</p>', '</div>', '</li>', '</tr>', '</h1>', '</h2>', '</h3>', '</h4>'],
         "\n",
