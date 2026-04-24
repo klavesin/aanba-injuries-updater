@@ -8,7 +8,7 @@ const DATA_DIR = ROOT_DIR . '/data';
 const LOG_DIR = ROOT_DIR . '/logs';
 const DATA_FILE = DATA_DIR . '/injuries.json';
 const LOG_FILE = LOG_DIR . '/update_injuries.log';
-const USER_AGENT = 'Mozilla/5.0 (compatible; AANBA-InjuriesBot/1.2; +https://aanba.info/)';
+const USER_AGENT = 'Mozilla/5.0 (compatible; AANBA-InjuriesBot/1.3; +https://aanba.info/)';
 
 const STATUS_MAP_RU = [
     'Out' => 'Не сыграет',
@@ -174,7 +174,16 @@ function ensureDirectories(): void
 function logLine(string $level, string $message): void
 {
     $timestamp = formatMoscowDateTime();
-    @file_put_contents(LOG_FILE, '[' . $timestamp . '] [' . $level . '] ' . $message . PHP_EOL, FILE_APPEND);
+    $line = '[' . $timestamp . '] [' . $level . '] ' . $message . PHP_EOL;
+
+    @file_put_contents(LOG_FILE, $line, FILE_APPEND);
+
+    if (PHP_SAPI === 'cli') {
+        echo $line;
+        if (function_exists('flush')) {
+            @flush();
+        }
+    }
 }
 
 function respond(bool $ok, string $message, array $extra = [], int $statusCode = 200): void
@@ -189,6 +198,7 @@ function respond(bool $ok, string $message, array $extra = [], int $statusCode =
     ], $extra), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
 
     if (PHP_SAPI === 'cli') {
+        echo PHP_EOL;
         exit($ok ? 0 : 1);
     }
 }
@@ -197,11 +207,14 @@ function fetchOfficialNbaRows(): array
 {
     $pdfUrl = discoverLatestOfficialPdfUrlDirect();
     if ($pdfUrl === '') {
-        throw new RuntimeException('Не удалось найти доступный официальный injury report PDF NBA прямым перебором ссылок.');
+        throw new RuntimeException('Не удалось найти свежий официальный injury report PDF NBA на странице official.nba.com.');
     }
     setOfficialPdfUrl($pdfUrl);
 
+    logLine('INFO', 'Скачиваю официальный PDF NBA: ' . $pdfUrl);
     $pdfBinary = httpGetBinary($pdfUrl);
+    logLine('INFO', 'PDF скачан. Размер: ' . strlen($pdfBinary) . ' байт. Извлекаю текст.');
+
     $pdfText = extractPdfText($pdfBinary);
     if ($pdfText === '') {
         throw new RuntimeException('Не удалось извлечь текст из официального PDF-отчёта NBA.');
@@ -268,25 +281,45 @@ function fetchCbsRows(): array
 
 function discoverLatestOfficialPdfUrlDirect(): string
 {
-    $nowEt = new DateTimeImmutable('now', new DateTimeZone('America/New_York'));
-    $startEt = $nowEt->modify('+90 minutes');
-    $startMinute = ((int)$startEt->format('i'));
-    $roundedMinute = (int)(ceil($startMinute / 15) * 15);
-    if ($roundedMinute === 60) {
-        $startEt = $startEt->modify('+1 hour')->setTime((int)$startEt->format('H') + 1, 0);
-    } else {
-        $startEt = $startEt->setTime((int)$startEt->format('H'), $roundedMinute);
+    $pageUrl = 'https://official.nba.com/nba-injury-report-2025-26-season/';
+    logLine('INFO', 'Ищу последний PDF NBA injury report на официальной странице: ' . $pageUrl);
+
+    try {
+        $html = httpGet($pageUrl);
+    } catch (Throwable $e) {
+        logLine('WARN', 'Не удалось открыть страницу NBA injury reports: ' . $e->getMessage());
+        return '';
     }
 
-    for ($i = 0; $i < 160; $i++) {
-        $candidateEt = $startEt->modify('-' . ($i * 15) . ' minutes');
-        $url = buildOfficialPdfUrlFromEt($candidateEt);
-        if (urlExists($url)) {
-            return $url;
+    $urls = [];
+
+    if (preg_match_all('/href=["\']([^"\']*Injury-Report_\d{4}-\d{2}-\d{2}_\d{1,2}_\d{2}(?:AM|PM)\.pdf[^"\']*)["\']/i', $html, $matches)) {
+        foreach ($matches[1] as $href) {
+            $url = html_entity_decode((string)$href, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+            $url = absolutizeUrl($url, $pageUrl);
+            $url = preg_replace('/\.pdf.*$/i', '.pdf', $url) ?? $url;
+
+            if (parseOfficialPdfTimestamp($url) > 0) {
+                $urls[] = $url;
+            }
         }
     }
 
-    return '';
+    if ($urls === []) {
+        logLine('WARN', 'На официальной странице NBA не найдено PDF-ссылок Injury-Report.');
+        return '';
+    }
+
+    $urls = array_values(array_unique($urls));
+
+    usort($urls, static function (string $a, string $b): int {
+        return parseOfficialPdfTimestamp($b) <=> parseOfficialPdfTimestamp($a);
+    });
+
+    $latestUrl = $urls[0];
+    logLine('INFO', 'Найден последний официальный PDF NBA: ' . $latestUrl);
+
+    return $latestUrl;
 }
 
 function buildOfficialPdfUrlFromEt(DateTimeImmutable $dtEt): string
@@ -308,10 +341,10 @@ function urlExists(string $url): bool
 {
     try {
         $result = request($url, 'HEAD', [
-            'connect_timeout' => 8,
-            'timeout' => 12,
+            'connect_timeout' => 5,
+            'timeout' => 8,
             'allow_status' => [200],
-            'retries' => 2,
+            'retries' => 1,
         ]);
         return ($result['code'] ?? 0) === 200;
     } catch (Throwable $e) {
@@ -328,6 +361,7 @@ function parseOfficialPdfTimestamp(string $url): int
     $hour = (int)$m[2];
     $minute = (int)$m[3];
     $period = strtoupper($m[4]);
+
     if ($period === 'PM' && $hour < 12) {
         $hour += 12;
     }
@@ -335,7 +369,12 @@ function parseOfficialPdfTimestamp(string $url): int
         $hour = 0;
     }
 
-    $dt = DateTimeImmutable::createFromFormat('Y-m-d H:i', sprintf('%s %02d:%02d', $m[1], $hour, $minute), new DateTimeZone('America/New_York'));
+    $dt = DateTimeImmutable::createFromFormat(
+        'Y-m-d H:i',
+        sprintf('%s %02d:%02d', $m[1], $hour, $minute),
+        new DateTimeZone('America/New_York')
+    );
+
     return $dt instanceof DateTimeImmutable ? $dt->getTimestamp() : 0;
 }
 
@@ -352,7 +391,11 @@ function parseOfficialPdfText(string $text): array
     $pending = null;
 
     foreach ($lines as $line) {
-        if (str_starts_with($line, 'Injury Report:') || str_starts_with($line, 'Page ') || str_contains($line, 'Game Date Game Time Matchup Team Player Name Current Status Reason')) {
+        if (
+            str_starts_with($line, 'Injury Report:') ||
+            str_starts_with($line, 'Page ') ||
+            str_contains($line, 'Game Date Game Time Matchup Team Player Name Current Status Reason')
+        ) {
             continue;
         }
 
@@ -360,6 +403,7 @@ function parseOfficialPdfText(string $text): array
         if (!is_array($parts)) {
             continue;
         }
+
         $parts = array_values(array_filter(array_map('trim', $parts), static fn(string $part): bool => $part !== ''));
         if ($parts === []) {
             continue;
@@ -568,6 +612,7 @@ function buildReturnInfo(?array $secondary): array
 function buildPayload(array $items, int $officialCount, int $espnCount, int $cbsCount, ?string $officialPdfUrl): array
 {
     $updatedAt = formatMoscowDateTime();
+
     return [
         'site_title' => 'Травмы игроков NBA',
         'last_updated' => $updatedAt,
@@ -604,18 +649,27 @@ function writeJsonAtomic(string $path, array $payload): void
     if ($json === false) {
         throw new RuntimeException('Не удалось сериализовать итоговый JSON.');
     }
+
     $tmpPath = $path . '.tmp';
     if (file_put_contents($tmpPath, $json) === false) {
         throw new RuntimeException('Не удалось записать временный JSON-файл.');
     }
+
     if (!rename($tmpPath, $path)) {
         @unlink($tmpPath);
         throw new RuntimeException('Не удалось заменить итоговый JSON-файл.');
     }
 }
 
-function httpGet(string $url): string { return request($url)['body']; }
-function httpGetBinary(string $url): string { return request($url)['body']; }
+function httpGet(string $url): string
+{
+    return request($url)['body'];
+}
+
+function httpGetBinary(string $url): string
+{
+    return request($url)['body'];
+}
 
 function request(string $url, string $method = 'GET', array $options = []): array
 {
@@ -672,21 +726,25 @@ function request(string $url, string $method = 'GET', array $options = []): arra
                 'Accept: */*',
                 'Accept-Language: en-US,en;q=0.9,ru;q=0.8',
             ];
+
             $context = stream_context_create([
                 'http' => [
                     'method' => $method,
-                    'header' => implode("
-", $headerLines) . "
-",
+                    'header' => implode("\r\n", $headerLines) . "\r\n",
                     'timeout' => $timeout,
                     'ignore_errors' => true,
                 ],
-                'ssl' => ['verify_peer' => true, 'verify_peer_name' => true],
+                'ssl' => [
+                    'verify_peer' => true,
+                    'verify_peer_name' => true,
+                ],
             ]);
+
             $body = @file_get_contents($url, false, $context);
             if ($body !== false) {
                 return ['body' => $body, 'code' => 200];
             }
+
             $lastError = 'stream request failed';
         }
 
@@ -704,6 +762,7 @@ function extractPdfText(string $binary): string
     if ($text !== '') {
         return normalizePdfText($text);
     }
+
     return normalizePdfText(extractPdfTextPurePhp($binary));
 }
 
@@ -712,17 +771,21 @@ function extractPdfTextViaPdftotext(string $binary): string
     if (!function_exists('shell_exec')) {
         return '';
     }
+
     $command = trim((string)@shell_exec('command -v pdftotext 2>/dev/null'));
     if ($command === '') {
         return '';
     }
+
     $tmp = tempnam(sys_get_temp_dir(), 'injury_pdf_');
     if ($tmp === false) {
         return '';
     }
+
     file_put_contents($tmp, $binary);
     $result = (string)@shell_exec(escapeshellarg($command) . ' -layout -nopgbrk ' . escapeshellarg($tmp) . ' - 2>/dev/null');
     @unlink($tmp);
+
     return $result;
 }
 
@@ -731,24 +794,28 @@ function extractPdfTextPurePhp(string $binary): string
     if (!preg_match_all('/stream\r?\n(.*?)\r?\nendstream/s', $binary, $matches)) {
         return '';
     }
+
     $text = '';
     foreach ($matches[1] as $stream) {
         $decoded = tryInflate($stream);
         if ($decoded === '') {
             $decoded = $stream;
         }
+
         if (preg_match_all('/\((?:\\\\.|[^\\\\()])*\)/s', $decoded, $strings)) {
             foreach ($strings[0] as $value) {
                 $text .= unescapePdfString(substr($value, 1, -1)) . "\n";
             }
         }
     }
+
     return $text;
 }
 
 function tryInflate(string $stream): string
 {
     $stream = ltrim($stream, "\r\n");
+
     foreach ([
         static fn(string $data): string|false => @gzuncompress($data),
         static fn(string $data): string|false => @gzinflate($data),
@@ -759,15 +826,18 @@ function tryInflate(string $stream): string
             return $decoded;
         }
     }
+
     return '';
 }
 
 function unescapePdfString(string $value): string
 {
     $value = str_replace(['\\(', '\\)', '\\\\'], ['(', ')', '\\'], $value);
+
     $value = preg_replace_callback('/\\\\([0-7]{1,3})/', static function (array $m): string {
         return chr(octdec($m[1]));
     }, $value) ?? $value;
+
     return trim($value);
 }
 
@@ -775,6 +845,7 @@ function normalizePdfText(string $text): string
 {
     $text = str_replace(["\r\n", "\r"], "\n", $text);
     $text = preg_replace('/[\t\x0B\x0C]+/u', ' ', $text) ?? $text;
+
     return trim($text);
 }
 
@@ -782,18 +853,25 @@ function normalizeHtmlToLines(string $html): array
 {
     $html = preg_replace('/<script\b[^>]*>.*?<\/script>/is', ' ', $html) ?? $html;
     $html = preg_replace('/<style\b[^>]*>.*?<\/style>/is', ' ', $html) ?? $html;
-    $html = str_replace(['<br>', '<br/>', '<br />', '</p>', '</div>', '</li>', '</tr>', '</h1>', '</h2>', '</h3>', '</h4>'], "\n", $html);
+    $html = str_replace(
+        ['<br>', '<br/>', '<br />', '</p>', '</div>', '</li>', '</tr>', '</h1>', '</h2>', '</h3>', '</h4>'],
+        "\n",
+        $html
+    );
+
     $text = html_entity_decode(strip_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8');
     $text = str_replace(["\r\n", "\r"], "\n", $text);
 
     $rawLines = explode("\n", $text);
     $lines = [];
+
     foreach ($rawLines as $line) {
         $line = trim(preg_replace('/\s+/u', ' ', $line) ?? $line);
         if ($line !== '') {
             $lines[] = $line;
         }
     }
+
     return $lines;
 }
 
@@ -802,9 +880,11 @@ function finalizeOfficialRow(array $row): array
     $row['player_name'] = normalizePlayerName((string)$row['player_name']);
     $row['team'] = canonicalTeam((string)$row['team']);
     $row['raw_reason'] = trim(preg_replace('/\s+/u', ' ', (string)$row['raw_reason']) ?? (string)$row['raw_reason']);
+
     if ($row['raw_reason'] === '') {
         $row['raw_reason'] = '-';
     }
+
     return $row;
 }
 
@@ -815,27 +895,43 @@ function findOfficialStatusIndex(array $parts): ?int
             return $index;
         }
     }
+
     return null;
 }
 
 function normalizePlayerName(string $name): string
 {
     $name = trim($name);
+
     if (str_contains($name, ',')) {
         [$last, $first] = array_map('trim', explode(',', $name, 2));
         $name = trim($first . ' ' . $last);
     }
+
     $name = preg_replace('/\s+/u', ' ', $name) ?? $name;
+
     return trim($name);
 }
 
-function canonicalTeam(string $team): string { return TEAM_ALIASES[$team] ?? $team; }
-function teamRu(string $team): string { return TEAM_RU_MAP[canonicalTeam($team)] ?? $team; }
-function translateStatusRu(string $status): string { return STATUS_MAP_RU[$status] ?? $status; }
+function canonicalTeam(string $team): string
+{
+    return TEAM_ALIASES[$team] ?? $team;
+}
+
+function teamRu(string $team): string
+{
+    return TEAM_RU_MAP[canonicalTeam($team)] ?? $team;
+}
+
+function translateStatusRu(string $status): string
+{
+    return STATUS_MAP_RU[$status] ?? $status;
+}
 
 function translateReasonRu(string $reason): string
 {
     $reason = trim($reason);
+
     if ($reason === '' || $reason === '-') {
         return 'Причина уточняется';
     }
@@ -881,6 +977,7 @@ function translateReasonRu(string $reason): string
     ];
 
     uksort($map, static fn(string $a, string $b): int => mb_strlen($b, 'UTF-8') <=> mb_strlen($a, 'UTF-8'));
+
     foreach ($map as $en => $ru) {
         $reason = str_ireplace($en, $ru, $reason);
     }
@@ -888,12 +985,14 @@ function translateReasonRu(string $reason): string
     $reason = preg_replace('/\s*;\s*/u', '; ', $reason) ?? $reason;
     $reason = preg_replace('/\s{2,}/u', ' ', $reason) ?? $reason;
     $reason = trim($reason, " -—;");
+
     return upperFirst($reason);
 }
 
 function translateCommentRu(string $comment): string
 {
     $comment = trim($comment);
+
     if ($comment === '') {
         return '';
     }
@@ -920,6 +1019,7 @@ function translateCommentRu(string $comment): string
 
     if (preg_match('/Expected to be out until at least\s+([A-Z][a-z]{2}\s+\d{1,2})/i', $comment, $m)) {
         $dateRu = monthDayToRu($m[1]);
+
         return $dateRu !== '' ? 'Ожидается отсутствие как минимум до ' . $dateRu : 'Срок возвращения уточняется';
     }
 
@@ -934,12 +1034,14 @@ function extractReturnDateRu(string $estimatedReturnRaw, string $commentRaw): st
             return $dateRu;
         }
     }
+
     if (preg_match('/Expected to be out until at least\s+([A-Z][a-z]{2}\s+\d{1,2})/i', $commentRaw, $m)) {
         $dateRu = monthDayToRu($m[1]);
         if ($dateRu !== '') {
             return $dateRu;
         }
     }
+
     return '';
 }
 
@@ -948,9 +1050,11 @@ function extractReevaluationRu(string $commentRaw): string
     if (preg_match('/re-evaluated in one week/i', $commentRaw)) {
         return 'Повторный осмотр через 1 неделю';
     }
+
     if (preg_match('/re-evaluated in two weeks/i', $commentRaw)) {
         return 'Повторный осмотр через 2 недели';
     }
+
     return '';
 }
 
@@ -959,6 +1063,7 @@ function monthDayToRu(string $monthDay): string
     if (!preg_match('/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})$/', trim($monthDay), $m)) {
         return '';
     }
+
     $month = MONTH_MAP[$m[1]] ?? null;
     if ($month === null) {
         return '';
@@ -969,6 +1074,7 @@ function monthDayToRu(string $monthDay): string
     $year = (int)$now->format('Y');
     $currentMonth = (int)$now->format('n');
     $targetMonth = (int)$month;
+
     if ($targetMonth < ($currentMonth - 6)) {
         $year += 1;
     }
@@ -979,9 +1085,11 @@ function monthDayToRu(string $monthDay): string
 function extractFullNameFromMixedString(string $value): string
 {
     $value = trim($value);
+
     if (preg_match('/([A-Z][A-Za-z\'\.-]+(?:\s+[A-Z][A-Za-z\'\.-]+){1,3})$/u', $value, $m)) {
         return trim($m[1]);
     }
+
     return '';
 }
 
@@ -998,9 +1106,11 @@ function buildItemId(string $playerName, string $team, string $date): string
 function dedupeByKey(array $rows, callable $callback): array
 {
     $result = [];
+
     foreach ($rows as $row) {
         $result[$callback($row)] = $row;
     }
+
     return array_values($result);
 }
 
@@ -1009,15 +1119,16 @@ function slugify(string $value): string
     $value = mb_strtolower(trim($value), 'UTF-8');
     $value = transliterate($value);
     $value = preg_replace('/[^a-z0-9]+/u', '-', $value) ?? $value;
+
     return trim($value, '-');
 }
 
 function transliterate(string $value): string
 {
     return strtr($value, [
-        'а' => 'a','б' => 'b','в' => 'v','г' => 'g','д' => 'd','е' => 'e','ё' => 'e','ж' => 'zh','з' => 'z','и' => 'i','й' => 'y',
-        'к' => 'k','л' => 'l','м' => 'm','н' => 'n','о' => 'o','п' => 'p','р' => 'r','с' => 's','т' => 't','у' => 'u','ф' => 'f',
-        'х' => 'h','ц' => 'ts','ч' => 'ch','ш' => 'sh','щ' => 'sch','ъ' => '','ы' => 'y','ь' => '','э' => 'e','ю' => 'yu','я' => 'ya',
+        'а' => 'a', 'б' => 'b', 'в' => 'v', 'г' => 'g', 'д' => 'd', 'е' => 'e', 'ё' => 'e', 'ж' => 'zh', 'з' => 'z', 'и' => 'i', 'й' => 'y',
+        'к' => 'k', 'л' => 'l', 'м' => 'm', 'н' => 'n', 'о' => 'o', 'п' => 'p', 'р' => 'r', 'с' => 's', 'т' => 't', 'у' => 'u', 'ф' => 'f',
+        'х' => 'h', 'ц' => 'ts', 'ч' => 'ch', 'ш' => 'sh', 'щ' => 'sch', 'ъ' => '', 'ы' => 'y', 'ь' => '', 'э' => 'e', 'ю' => 'yu', 'я' => 'ya',
     ]);
 }
 
@@ -1026,6 +1137,7 @@ function upperFirst(string $value): string
     if ($value === '') {
         return $value;
     }
+
     return mb_strtoupper(mb_substr($value, 0, 1, 'UTF-8'), 'UTF-8') . mb_substr($value, 1, null, 'UTF-8');
 }
 
@@ -1037,10 +1149,13 @@ function todayYmd(): string
 function normalizeSlashDate(string $value): string
 {
     $value = trim($value);
+
     if ($value === '') {
         return todayYmd();
     }
+
     $dt = DateTimeImmutable::createFromFormat('m/d/Y', $value, new DateTimeZone('America/New_York'));
+
     return $dt instanceof DateTimeImmutable ? $dt->format('Y-m-d') : todayYmd();
 }
 
@@ -1067,16 +1182,27 @@ function absolutizeUrl(string $url, string $baseUrl): string
     if (preg_match('/^https?:\/\//i', $url)) {
         return $url;
     }
+
     $base = parse_url($baseUrl);
     $scheme = $base['scheme'] ?? 'https';
     $host = $base['host'] ?? '';
+
     if (str_starts_with($url, '/')) {
         return $scheme . '://' . $host . $url;
     }
+
     $path = $base['path'] ?? '/';
     $directory = rtrim(dirname($path), '/\\');
+
     return $scheme . '://' . $host . $directory . '/' . ltrim($url, '/');
 }
 
-function getOfficialPdfUrl(): ?string { return $GLOBALS['official_pdf_url'] ?? null; }
-function setOfficialPdfUrl(string $url): void { $GLOBALS['official_pdf_url'] = $url; }
+function getOfficialPdfUrl(): ?string
+{
+    return $GLOBALS['official_pdf_url'] ?? null;
+}
+
+function setOfficialPdfUrl(string $url): void
+{
+    $GLOBALS['official_pdf_url'] = $url;
+}
