@@ -779,6 +779,7 @@ function parseEspnLine(string $line, string $team): ?array
         'estimated_return_raw' => $estimatedReturnRaw,
         'comment_raw' => $comment,
         'status_hint_raw' => trim($prefix),
+        'injury_raw' => trim($prefix),
         'report_date' => todayYmd(),
     ];
 }
@@ -807,6 +808,7 @@ function parseCbsLine(string $line, string $team): ?array
         'team' => $team,
         'estimated_return_raw' => $estimatedReturnRaw,
         'comment_raw' => trim($m['status']),
+        'injury_raw' => trim($m['injury']),
         'status_hint_raw' => '',
         'report_date' => todayYmd(),
     ];
@@ -832,7 +834,8 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
         $returnSource = isset($espnIndex[$key]) ? 'espn' : (isset($cbsIndex[$key]) ? 'cbs' : 'fallback');
 
         $playerRu = playerRu((string)$official['player_name']);
-        $reasonInfo = buildReasonRu((string)$official['raw_reason']);
+        $reasonSourceRaw = enrichReasonRaw((string)$official['raw_reason'], $secondary);
+        $reasonInfo = buildReasonRu($reasonSourceRaw);
         $reasonRu = $reasonInfo['reason_ru'];
         $reasonDetailRu = $reasonInfo['reason_detail_ru'];
 
@@ -854,6 +857,7 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
             'team_ru' => teamRu($official['team']),
             'raw_status' => $official['raw_status'],
             'raw_reason' => $official['raw_reason'],
+            'reason_source_raw' => $reasonSourceRaw,
             'raw_comment' => (string)($secondary['comment_raw'] ?? ''),
             'status_ru' => translateStatusRu($official['raw_status']),
             'reason_ru' => $reasonRu,
@@ -880,6 +884,39 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
     }
 
     return $items;
+}
+
+function enrichReasonRaw(string $officialReason, ?array $secondary): string
+{
+    $official = cleanupOfficialReasonText($officialReason);
+    $secondaryReason = trim((string)($secondary['injury_raw'] ?? $secondary['status_hint_raw'] ?? ''));
+    $secondaryReason = cleanupOfficialReasonText($secondaryReason);
+
+    if ($official === '') {
+        return $secondaryReason;
+    }
+
+    if ($secondaryReason === '') {
+        return $officialReason;
+    }
+
+    if (hasKnownBodyPartInReason($official)) {
+        return $officialReason;
+    }
+
+    if (hasKnownBodyPartInReason($secondaryReason)) {
+        return trim($secondaryReason . '; ' . $official, " ;\t\n\r\0\x0B");
+    }
+
+    return $officialReason;
+}
+
+function hasKnownBodyPartInReason(string $reason): bool
+{
+    $clean = cleanupOfficialReasonText($reason);
+    $lower = mb_strtolower($clean, 'UTF-8');
+
+    return findBodyPartInfo($lower) !== null;
 }
 
 function buildReturnInfo(?array $secondary, string $rawStatus): array
@@ -914,14 +951,17 @@ function fallbackReturnRu(string $rawStatus): string
 
 function fallbackCommentRu(string $rawStatus, string $reasonRu): string
 {
-    $reasonPart = $reasonRu !== '' && $reasonRu !== 'Причина уточняется' ? ' Причина: ' . mb_strtolower($reasonRu, 'UTF-8') . '.' : '';
+    $hasReason = $reasonRu !== '' && $reasonRu !== 'Причина уточняется';
+    $reasonLower = $hasReason ? lowerFirstRu($reasonRu) : '';
+    $reasonPart = $hasReason ? ' Причина: ' . $reasonLower . '.' : '';
+    $medicalNote = $hasReason ? ' В отчёте NBA указан медицинский фактор: ' . $reasonLower . '.' : '';
 
     return match ($rawStatus) {
         'Out' => 'Не сыграет по официальному отчёту NBA; конкретный срок возвращения не указан.' . $reasonPart,
         'Questionable', 'Game-Time Decision' => 'Участие под вопросом; решение ожидается ближе к началу матча.' . $reasonPart,
         'Doubtful' => 'Вероятность участия низкая.' . $reasonPart,
-        'Probable' => 'Ожидается участие, если не будет ухудшения состояния.' . $reasonPart,
-        'Available' => 'Игрок доступен к матчу.' . $reasonPart,
+        'Probable' => 'Ожидается участие, если не будет ухудшения состояния.' . $medicalNote,
+        'Available' => 'Игрок доступен к матчу.' . $medicalNote,
         default => 'Дополнительные детали в официальном отчёте NBA не указаны.' . $reasonPart,
     };
 }
@@ -940,7 +980,7 @@ function buildPayload(array $items, int $officialCount, int $espnCount, int $cbs
         'meta' => [
             'timezone' => 'Europe/Moscow',
             'generated_at' => $updatedAt,
-            'schema_version' => '1.1.0',
+            'schema_version' => '1.1.1',
             'primary_status_source' => 'official_nba',
             'return_source_priority' => ['espn', 'cbs', 'fallback_by_status'],
             'translation_mode' => 'short_ru_reason_with_player_transliteration_fallback',
@@ -1380,15 +1420,23 @@ function buildReasonRu(string $reason): array
 
     $body = findBodyPartInfo($lower);
     $side = findSideInfo($lowerRaw);
-    $detail = findInjuryDetailRu($lowerRaw);
+    $details = findInjuryDetailsRu($lowerRaw);
+    $detail = implode(', ', $details);
 
     if ($body !== null) {
         $reasonRu = buildBodyReasonPhrase($body, $side);
+        if ($detail !== '') {
+            $reasonRu .= ' — ' . $detail;
+        }
         return ['reason_ru' => $reasonRu, 'reason_detail_ru' => $detail];
     }
 
-    if ($detail !== '') {
-        return ['reason_ru' => upperFirst($detail), 'reason_detail_ru' => $detail];
+    if ($details !== []) {
+        $reasonRu = upperFirst($detail);
+        if (needsUnknownAreaNoteRu($details)) {
+            $reasonRu .= ' — без детальных уточнений в отчёте NBA';
+        }
+        return ['reason_ru' => $reasonRu, 'reason_detail_ru' => $detail];
     }
 
     return ['reason_ru' => 'Причина уточняется', 'reason_detail_ru' => ''];
@@ -1400,6 +1448,7 @@ function cleanupOfficialReasonText(string $reason): string
     $reason = preg_replace('/^Injury\/Illness\s*-\s*/i', '', $reason) ?? $reason;
     $reason = preg_replace('/^Illness\s*-\s*/i', '', $reason) ?? $reason;
     $reason = preg_replace('/^Not With Team\s*-\s*/i', '', $reason) ?? $reason;
+    $reason = preg_replace('/\s+-\s+/u', '; ', $reason) ?? $reason;
     $reason = preg_replace('/\s*;\s*/u', '; ', $reason) ?? $reason;
     $reason = preg_replace('/\s+/u', ' ', $reason) ?? $reason;
     return trim($reason, " -—;\t\n\r\0\x0B");
@@ -1422,16 +1471,22 @@ function findSideInfo(string $lower): ?string
 function findBodyPartInfo(string $lower): ?array
 {
     $map = [
+        ['keys' => ['lower back'], 'genitive' => 'поясницы', 'gender' => 'f'],
+        ['keys' => ['high ankle'], 'genitive' => 'голеностопа', 'gender' => 'm'],
+        ['keys' => ['shin splints', 'shin splint', 'splints', 'splint', 'shin'], 'genitive' => 'голени', 'gender' => 'f'],
+        ['keys' => ['tibia'], 'genitive' => 'большеберцовой кости', 'gender' => 'f'],
         ['keys' => ['hamstring'], 'genitive' => 'подколенного сухожилия', 'gender' => 'n'],
+        ['keys' => ['calf'], 'genitive' => 'икроножной мышцы', 'gender' => 'f'],
+        ['keys' => ['quad', 'quadriceps'], 'genitive' => 'четырёхглавой мышцы бедра', 'gender' => 'f'],
+        ['keys' => ['adductor'], 'genitive' => 'приводящей мышцы', 'gender' => 'f'],
+        ['keys' => ['oblique'], 'genitive' => 'косой мышцы корпуса', 'gender' => 'f'],
+        ['keys' => ['groin'], 'genitive' => 'паха', 'gender' => 'm'],
         ['keys' => ['knee'], 'genitive' => 'колена', 'gender' => 'n'],
-        ['keys' => ['ankle', 'high ankle'], 'genitive' => 'голеностопа', 'gender' => 'm'],
+        ['keys' => ['ankle'], 'genitive' => 'голеностопа', 'gender' => 'm'],
         ['keys' => ['foot'], 'genitive' => 'стопы', 'gender' => 'f'],
         ['keys' => ['toe'], 'genitive' => 'пальца ноги', 'gender' => 'm'],
-        ['keys' => ['calf'], 'genitive' => 'икроножной мышцы', 'gender' => 'f'],
-        ['keys' => ['groin'], 'genitive' => 'паха', 'gender' => 'm'],
         ['keys' => ['hip'], 'genitive' => 'бедра', 'gender' => 'n'],
         ['keys' => ['back'], 'genitive' => 'спины', 'gender' => 'f'],
-        ['keys' => ['lower back'], 'genitive' => 'поясницы', 'gender' => 'f'],
         ['keys' => ['shoulder'], 'genitive' => 'плеча', 'gender' => 'n'],
         ['keys' => ['elbow'], 'genitive' => 'локтя', 'gender' => 'm'],
         ['keys' => ['wrist'], 'genitive' => 'запястья', 'gender' => 'n'],
@@ -1441,9 +1496,6 @@ function findBodyPartInfo(string $lower): ?array
         ['keys' => ['neck'], 'genitive' => 'шеи', 'gender' => 'f'],
         ['keys' => ['achilles'], 'genitive' => 'ахилла', 'gender' => 'm'],
         ['keys' => ['rib', 'ribs'], 'genitive' => 'рёбер', 'gender' => 'pl'],
-        ['keys' => ['oblique'], 'genitive' => 'косой мышцы корпуса', 'gender' => 'f'],
-        ['keys' => ['adductor'], 'genitive' => 'приводящей мышцы', 'gender' => 'f'],
-        ['keys' => ['quad', 'quadriceps'], 'genitive' => 'четырёхглавой мышцы бедра', 'gender' => 'f'],
         ['keys' => ['face'], 'genitive' => 'лица', 'gender' => 'n'],
         ['keys' => ['nose'], 'genitive' => 'носа', 'gender' => 'm'],
         ['keys' => ['eye'], 'genitive' => 'глаза', 'gender' => 'm'],
@@ -1461,7 +1513,6 @@ function findBodyPartInfo(string $lower): ?array
 
     return null;
 }
-
 function buildBodyReasonPhrase(array $body, ?string $side): string
 {
     $genitive = (string)$body['genitive'];
@@ -1486,9 +1537,13 @@ function buildBodyReasonPhrase(array $body, ?string $side): string
     return trim('Травма ' . $sideWord . ' ' . $genitive);
 }
 
-function findInjuryDetailRu(string $lower): string
+function findInjuryDetailsRu(string $lower): array
 {
     $detailMap = [
+        'shin splints' => 'шинсплинт',
+        'shin splint' => 'шинсплинт',
+        'splints' => 'шинсплинт',
+        'splint' => 'шинсплинт',
         'surgery' => 'после операции',
         'fracture' => 'перелом',
         'broken' => 'перелом',
@@ -1502,19 +1557,72 @@ function findInjuryDetailRu(string $lower): string
         'inflammation' => 'воспаление',
         'tendinitis' => 'воспаление сухожилия',
         'tendonitis' => 'воспаление сухожилия',
+        'tendinopathy' => 'проблемы с сухожилием',
+        'tendon' => 'повреждение сухожилия',
         'dislocation' => 'вывих',
         'laceration' => 'рассечение',
         'tear' => 'повреждение',
         'muscle' => 'мышечная травма',
     ];
 
+    $details = [];
     foreach ($detailMap as $key => $value) {
-        if (preg_match('/\b' . preg_quote($key, '/') . '\b/i', $lower)) {
-            return $value;
+        if (preg_match('/\b' . preg_quote($key, '/') . '\b/i', $lower) && !in_array($value, $details, true)) {
+            $details[] = $value;
         }
     }
 
-    return '';
+    if (in_array('растяжение мышцы', $details, true)) {
+        $details = array_values(array_filter($details, static fn(string $detail): bool => $detail !== 'мышечная травма'));
+    }
+
+    return $details;
+}
+
+function findInjuryDetailRu(string $lower): string
+{
+    $details = findInjuryDetailsRu($lower);
+
+    return $details[0] ?? '';
+}
+
+function needsUnknownAreaNoteRu(array $details): bool
+{
+    $genericDetails = [
+        'растяжение мышцы',
+        'растяжение связок',
+        'мышечная травма',
+        'болезненность',
+        'боль',
+        'ушиб',
+        'воспаление',
+    ];
+
+    foreach ($details as $detail) {
+        if (str_contains($detail, 'голени') || str_contains($detail, 'шинсплинт')) {
+            return false;
+        }
+    }
+
+    foreach ($details as $detail) {
+        if (in_array($detail, $genericDetails, true)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+function lowerFirstRu(string $value): string
+{
+    $value = trim($value);
+    if ($value === '') {
+        return '';
+    }
+
+    $first = mb_substr($value, 0, 1, 'UTF-8');
+    $rest = mb_substr($value, 1, null, 'UTF-8');
+
+    return mb_strtolower($first, 'UTF-8') . $rest;
 }
 
 function containsAny(string $haystack, array $needles): bool
