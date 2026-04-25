@@ -976,7 +976,7 @@ function buildPayload(array $items, int $officialCount, int $espnCount, int $cbs
         'status' => 'ok',
         'source_label' => 'NBA + ESPN/CBS',
         'data_state_label' => 'Актуальные данные',
-        'feed_mode_label' => 'В реальном времени',
+        'feed_mode_label' => 'Последний отчёт НБА',
         'meta' => [
             'timezone' => 'Europe/Moscow',
             'generated_at' => $updatedAt,
@@ -1281,17 +1281,75 @@ function normalizePlayerName(string $name): string
 function playerRu(string $name): string
 {
     $normalized = normalizePlayerName($name);
+    $withoutSuffixNoise = preg_replace('/\s+\(.*?\)$/u', '', $normalized) ?? $normalized;
+
+    $externalMap = playerRuExternalMap();
+
+    if (isset($externalMap[$normalized])) {
+        return $externalMap[$normalized];
+    }
+
+    if (isset($externalMap[$withoutSuffixNoise])) {
+        return $externalMap[$withoutSuffixNoise];
+    }
 
     if (isset(PLAYER_RU_MAP[$normalized])) {
         return PLAYER_RU_MAP[$normalized];
     }
 
-    $withoutSuffixNoise = preg_replace('/\s+\(.*?\)$/u', '', $normalized) ?? $normalized;
     if (isset(PLAYER_RU_MAP[$withoutSuffixNoise])) {
         return PLAYER_RU_MAP[$withoutSuffixNoise];
     }
 
     return transliteratePlayerNameRu($normalized);
+}
+
+function playerRuExternalMap(): array
+{
+    static $map = null;
+
+    if ($map !== null) {
+        return $map;
+    }
+
+    $map = [];
+    $file = DATA_DIR . '/player_names_ru.json';
+
+    if (!is_file($file)) {
+        return $map;
+    }
+
+    $raw = file_get_contents($file);
+    if ($raw === false || trim($raw) === '') {
+        return $map;
+    }
+
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) {
+        return $map;
+    }
+
+    foreach ($decoded as $englishName => $russianName) {
+        if (!is_string($englishName) || !is_string($russianName)) {
+            continue;
+        }
+
+        $englishName = normalizePlayerName($englishName);
+        $russianName = trim($russianName);
+
+        if ($englishName === '' || $russianName === '') {
+            continue;
+        }
+
+        $map[$englishName] = $russianName;
+
+        $withoutSuffixNoise = preg_replace('/\s+\(.*?\)$/u', '', $englishName) ?? $englishName;
+        if ($withoutSuffixNoise !== '') {
+            $map[$withoutSuffixNoise] = $russianName;
+        }
+    }
+
+    return $map;
 }
 
 function transliteratePlayerNameRu(string $name): string
