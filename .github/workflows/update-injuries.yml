@@ -2,10 +2,11 @@ name: Update NBA injuries JSON
 
 on:
   workflow_dispatch:
-  # Резервный запуск GitHub. Основной стабильный запуск каждые 20 минут
-  # делаем внешним cron-trigger через workflow_dispatch API.
   schedule:
-    - cron: '11 * * * *'
+    # Резервный запуск GitHub каждые 15 минут.
+    # Основной стабильный запуск можно дополнительно держать через cron-job.org.
+    # Минуты специально не 0/15/30/45, чтобы не попадать в самые загруженные точки часа.
+    - cron: '7,22,37,52 * * * *'
 
 concurrency:
   group: nba-injuries-updater
