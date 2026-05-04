@@ -994,16 +994,25 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
         }
 
         $playerRu = playerRu((string)$official['player_name']);
+        $rawStatus = (string)$official['raw_status'];
+        $isAvailableOfficial = $rawStatus === 'Available';
+
         $reasonSourceRaw = enrichReasonRaw((string)$official['raw_reason'], $secondary);
         $reasonInfo = buildReasonRu($reasonSourceRaw);
         $reasonRu = $reasonInfo['reason_ru'];
         $reasonDetailRu = $reasonInfo['reason_detail_ru'];
 
-        $returnInfo = buildReturnInfo($secondary, (string)$official['raw_status']);
-        $secondaryCommentRu = translateCommentRu((string)($secondary['comment_raw'] ?? ''));
-        $commentRu = buildTableCommentRu((string)$official['raw_status'], $reasonRu, $playerRu, $secondaryCommentRu);
+        // Для статуса Available медицинскую пометку не показываем в колонке "Причина",
+        // но сохраняем её для мягкого контекста в комментарии.
+        $availableMedicalReasonRu = $reasonRu;
+        $availableMedicalReasonSourceRaw = $reasonSourceRaw;
 
-        $manualOverride = manualInjuryOverride((string)$official['player_name'], (string)$official['team'], (string)$official['raw_reason'], (string)$official['raw_status']);
+        $returnInfo = buildReturnInfo($secondary, $rawStatus);
+        $secondaryCommentRu = translateCommentRu((string)($secondary['comment_raw'] ?? ''));
+        $commentRu = buildTableCommentRu($rawStatus, $reasonRu, $playerRu, $secondaryCommentRu);
+
+        // Ручные override-правки не должны перебивать официальный статус Available.
+        $manualOverride = $isAvailableOfficial ? null : manualInjuryOverride((string)$official['player_name'], (string)$official['team'], (string)$official['raw_reason'], $rawStatus);
         if ($manualOverride !== null) {
             if (($manualOverride['reason_ru'] ?? '') !== '') {
                 $reasonRu = (string)$manualOverride['reason_ru'];
@@ -1027,20 +1036,16 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
             $matchType = $matchType !== '' ? $matchType . '+manual_verified' : 'manual_verified';
         }
 
-        if ((string)$official['raw_status'] === 'Available') {
-            $availableReasonSourceRaw = $reasonSourceRaw;
-            $availableReasonRu = $reasonRu;
-            $availableMedicalMarkerRu = availableMedicalMarkerRu($availableReasonSourceRaw, $availableReasonRu);
-
-            // Игрок уже допущен к матчу, поэтому в пользовательской колонке "Причина"
-            // показываем не медицинскую историю, а отсутствие причины ограничения.
-            // Саму медицинскую пометку сохраняем мягко в комментарии.
+        if ($isAvailableOfficial) {
             $reasonRu = '—';
             $reasonDetailRu = '';
-            $reasonSourceRaw = $availableReasonSourceRaw;
-
-            $availableSubject = playerShortRu($playerRu);
-            $commentRu = buildAvailableCommentRu($availableSubject !== '' ? $availableSubject : 'Игрок', $availableMedicalMarkerRu);
+            $reasonSourceRaw = '';
+            $returnInfo['estimated_return_date_raw'] = '';
+            $returnInfo['estimated_return_date_ru'] = 'Готов к игре';
+            $returnInfo['reevaluation_raw'] = '';
+            $returnInfo['reevaluation_ru'] = '';
+            $returnInfo['return_or_reevaluation_ru'] = 'Готов к игре';
+            $commentRu = buildAvailableCommentRu($playerRu, $availableMedicalReasonRu, $availableMedicalReasonSourceRaw);
         }
 
         $sourceComment = $manualOverride !== null ? 'manual_verified' : ($secondary !== null && trim((string)($secondary['comment_raw'] ?? '')) !== '' ? $returnSource : 'fallback');
@@ -1271,6 +1276,126 @@ function fallbackReturnRu(string $rawStatus): string
     };
 }
 
+function buildAvailableCommentRu(string $playerRu, string $medicalReasonRu = '', string $reasonSourceRaw = ''): string
+{
+    $subject = playerShortRu($playerRu);
+    $subject = $subject !== '' ? $subject : 'Игрок';
+
+    $medicalReasonRu = trim($medicalReasonRu);
+    if ($medicalReasonRu === '' || $medicalReasonRu === '—' || $medicalReasonRu === 'Причина уточняется') {
+        return $subject . ' доступен к матчу.';
+    }
+
+    $area = medicalAreaForAvailableRu($reasonSourceRaw, $medicalReasonRu);
+    if ($area !== '') {
+        return $subject . ' доступен к матчу. В отчёте лиги есть медицинская пометка ' . $area . ', но ограничений по участию не заявлено.';
+    }
+
+    return $subject . ' доступен к матчу. В отчёте лиги есть медицинская пометка, но ограничений по участию не заявлено.';
+}
+
+function medicalAreaForAvailableRu(string $reasonSourceRaw, string $medicalReasonRu): string
+{
+    $raw = cleanupOfficialReasonText($reasonSourceRaw);
+    $lowerRaw = mb_strtolower($raw, 'UTF-8');
+    $body = findBodyPartInfo($lowerRaw);
+    $side = findSideInfo($lowerRaw);
+
+    if ($body !== null) {
+        return 'по ' . buildBodyPrepositionalPhrase($body, $side);
+    }
+
+    $reasonLower = mb_strtolower(trim($medicalReasonRu), 'UTF-8');
+    $patterns = [
+        '/правой голени/u' => 'по правой голени',
+        '/левой голени/u' => 'по левой голени',
+        '/правого бедра/u' => 'по правому бедру',
+        '/левого бедра/u' => 'по левому бедру',
+        '/правого колена/u' => 'по правому колену',
+        '/левого колена/u' => 'по левому колену',
+        '/правой стопы/u' => 'по правой стопе',
+        '/левой стопы/u' => 'по левой стопе',
+        '/правого голеностопа/u' => 'по правому голеностопу',
+        '/левого голеностопа/u' => 'по левому голеностопу',
+        '/правого ахилла/u' => 'по правому ахиллу',
+        '/левого ахилла/u' => 'по левому ахиллу',
+        '/поясницы/u' => 'по пояснице',
+        '/спины/u' => 'по спине',
+        '/шеи/u' => 'по шее',
+    ];
+
+    foreach ($patterns as $pattern => $phrase) {
+        if (preg_match($pattern, $reasonLower)) {
+            return $phrase;
+        }
+    }
+
+    return '';
+}
+
+function buildBodyPrepositionalPhrase(array $body, ?string $side): string
+{
+    $gender = (string)$body['gender'];
+    $bodyPhrase = bodyPrepositionalRu((string)$body['genitive']);
+
+    if ($side === 'bilateral') {
+        return 'обеим сторонам: ' . $bodyPhrase;
+    }
+
+    $sideWord = sidePrepositionalAdjectiveRu($side, $gender);
+    return trim($sideWord . ' ' . $bodyPhrase);
+}
+
+function bodyPrepositionalRu(string $genitive): string
+{
+    return match ($genitive) {
+        'поясницы' => 'пояснице',
+        'голеностопа' => 'голеностопу',
+        'голени' => 'голени',
+        'большеберцовой кости' => 'большеберцовой кости',
+        'бедра' => 'бедру',
+        'икроножной мышцы' => 'икроножной мышце',
+        'четырёхглавой мышцы бедра' => 'четырёхглавой мышце бедра',
+        'приводящей мышцы' => 'приводящей мышце',
+        'косой мышцы корпуса' => 'косой мышце корпуса',
+        'паха' => 'паху',
+        'колена' => 'колену',
+        'стопы' => 'стопе',
+        'пальца ноги' => 'пальцу ноги',
+        'спины' => 'спине',
+        'плеча' => 'плечу',
+        'локтя' => 'локтю',
+        'запястья' => 'запястью',
+        'кисти' => 'кисти',
+        'пальца руки' => 'пальцу руки',
+        'большого пальца руки' => 'большому пальцу руки',
+        'шеи' => 'шее',
+        'ахилла' => 'ахиллу',
+        'рёбер' => 'рёбрам',
+        'лица' => 'лицу',
+        'носа' => 'носу',
+        'глаза' => 'глазу',
+        'головы' => 'голове',
+        'мышц корпуса' => 'мышцам корпуса',
+        default => $genitive,
+    };
+}
+
+function sidePrepositionalAdjectiveRu(?string $side, string $gender): string
+{
+    if ($side === null || $gender === 'pl') {
+        return '';
+    }
+
+    return match ($side . ':' . $gender) {
+        'left:m', 'left:n' => 'левому',
+        'left:f' => 'левой',
+        'right:m', 'right:n' => 'правому',
+        'right:f' => 'правой',
+        default => '',
+    };
+}
+
 function buildTableCommentRu(string $rawStatus, string $reasonRu, string $playerRu, string $secondaryCommentRu = ''): string
 {
     $subject = playerShortRu($playerRu);
@@ -1287,7 +1412,7 @@ function buildTableCommentRu(string $rawStatus, string $reasonRu, string $player
         return match ($rawStatus) {
             'Questionable', 'Game-Time Decision' => 'Участие ' . $subjectGenitive . ' под вопросом из-за болезни. ' . $illnessDetails . ' Финальный статус стоит проверить перед матчем.',
             'Probable' => $subject . ' ожидается в составе. В отчёте лиги указана болезнь. ' . $illnessDetails . ' Финальный статус стоит проверить перед матчем.',
-            'Available' => $subject . ' доступен к матчу. В отчёте лиги указана болезнь. ' . $illnessDetails,
+            'Available' => buildAvailableCommentRu($playerRu, $reasonRu, ''),
             'Out' => $subject . ' не сыграет из-за болезни. ' . $illnessDetails,
             'Doubtful' => 'Участие ' . $subjectGenitive . ' маловероятно из-за болезни. ' . $illnessDetails . ' Финальный статус стоит проверить перед матчем.',
             default => 'В отчёте лиги указана болезнь. ' . $illnessDetails,
@@ -1300,7 +1425,7 @@ function buildTableCommentRu(string $rawStatus, string $reasonRu, string $player
     return match ($rawStatus) {
         'Questionable', 'Game-Time Decision' => 'Участие ' . $subjectGenitive . ' под вопросом.' . $reasonSentence . ' Финальный статус стоит проверить перед матчем.',
         'Probable' => $subject . ' ожидается в составе.' . $reasonSentence . ' Финальный статус стоит проверить перед матчем.',
-        'Available' => $subject . ' доступен к матчу.' . $reasonSentence,
+        'Available' => buildAvailableCommentRu($playerRu, $reasonRu, ''),
         'Doubtful' => 'Участие ' . $subjectGenitive . ' маловероятно.' . $reasonSentence . ' Финальный статус стоит проверить перед матчем.',
         'Out' => buildOutCommentRu($subject, $reasonSentence, $secondaryCommentRu),
         default => $hasReason ? 'В свежем отчёте лиги указана причина: ' . lowerFirstRu($reasonRu) . '.' : 'Дополнительные детали в отчёте лиги не указаны.',
@@ -1354,125 +1479,6 @@ function medicalMarkerSentenceRu(string $reasonRu): string
     }
 
     return ' В свежем отчёте лиги указана причина: ' . lowerFirstRu($reasonRu) . '.';
-}
-
-function buildAvailableCommentRu(string $subject, string $medicalMarkerRu = ''): string
-{
-    $subject = trim($subject) !== '' ? trim($subject) : 'Игрок';
-    $medicalMarkerRu = trim($medicalMarkerRu);
-
-    if ($medicalMarkerRu === '') {
-        return $subject . ' доступен к матчу.';
-    }
-
-    return $subject . ' доступен к матчу. В отчёте лиги есть медицинская пометка ' . $medicalMarkerRu . ', но ограничений по участию не заявлено.';
-}
-
-function availableMedicalMarkerRu(string $rawReason, string $reasonRu = ''): string
-{
-    $clean = cleanupOfficialReasonText($rawReason);
-    $lower = mb_strtolower($clean, 'UTF-8');
-    $reasonLower = mb_strtolower(trim($reasonRu), 'UTF-8');
-
-    if ($clean === '' || trim($reasonRu) === '' || trim($reasonRu) === '—' || trim($reasonRu) === 'Причина уточняется') {
-        return '';
-    }
-
-    // Для доступных игроков не выносим наружу болезни, отдых, личные причины и служебные пометки:
-    // в таблице важнее факт, что игрок уже допущен к матчу.
-    if (containsAny($reasonLower . ' ' . $lower, [
-        'болезнь',
-        'симптомы болезни',
-        'illness',
-        'personal',
-        'личные причины',
-        'rest',
-        'отдых',
-        'g league',
-        'джи-лига',
-        'контроль нагрузки',
-        'набор игровых кондиций',
-    ])) {
-        return '';
-    }
-
-    $body = findBodyPartInfo($lower);
-    $side = findSideInfo($lower);
-
-    if ($body === null) {
-        return '';
-    }
-
-    $area = bodyAreaDativeRu($body, $side);
-    if ($area === '') {
-        return '';
-    }
-
-    return 'по ' . $area;
-}
-
-function bodyAreaDativeRu(array $body, ?string $side): string
-{
-    $genitive = (string)($body['genitive'] ?? '');
-    $gender = (string)($body['gender'] ?? '');
-
-    if ($genitive === '' || $gender === 'pl') {
-        return '';
-    }
-
-    $dativeMap = [
-        'поясницы' => 'пояснице',
-        'голеностопа' => 'голеностопу',
-        'голени' => 'голени',
-        'большеберцовой кости' => 'большеберцовой кости',
-        'бедра' => 'бедру',
-        'икроножной мышцы' => 'икроножной мышце',
-        'четырёхглавой мышцы бедра' => 'четырёхглавой мышце бедра',
-        'приводящей мышцы' => 'приводящей мышце',
-        'косой мышцы корпуса' => 'косой мышце корпуса',
-        'паха' => 'паху',
-        'колена' => 'колену',
-        'стопы' => 'стопе',
-        'пальца ноги' => 'пальцу ноги',
-        'спины' => 'спине',
-        'плеча' => 'плечу',
-        'локтя' => 'локтю',
-        'запястья' => 'запястью',
-        'кисти' => 'кисти',
-        'пальца руки' => 'пальцу руки',
-        'большого пальца руки' => 'большому пальцу руки',
-        'шеи' => 'шее',
-        'ахилла' => 'ахиллу',
-        'лица' => 'лицу',
-        'носа' => 'носу',
-        'глаза' => 'глазу',
-        'головы' => 'голове',
-        'мышц корпуса' => 'мышцам корпуса',
-    ];
-
-    $bodyDative = $dativeMap[$genitive] ?? '';
-    if ($bodyDative === '') {
-        return '';
-    }
-
-    $sideWord = sideAdjectiveDativeRu($side, $gender);
-
-    return trim($sideWord . ' ' . $bodyDative);
-}
-
-function sideAdjectiveDativeRu(?string $side, string $gender): string
-{
-    if ($side === null || $gender === 'pl') {
-        return '';
-    }
-
-    return match ($side . ':' . $gender) {
-        'left:m', 'left:n' => 'левому',
-        'left:f' => 'левой',
-        'right:m', 'right:n' => 'правому',
-        'right:f' => 'правой',
-        default => '',
-    };
 }
 
 function buildPayload(array $items, int $officialCount, int $espnCount, int $cbsCount, ?string $officialPdfUrl): array
