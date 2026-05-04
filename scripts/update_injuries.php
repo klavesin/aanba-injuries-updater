@@ -653,6 +653,149 @@ function parseOfficialPdfTimestamp(string $url): int
 function parseOfficialPdfText(string $text): array
 {
     $text = str_replace(["\r\n", "\r"], "\n", $text);
+
+    $rows = parseOfficialPdfTextByColumns($text);
+    if ($rows !== []) {
+        return $rows;
+    }
+
+    return parseOfficialPdfTextFallback($text);
+}
+
+function parseOfficialPdfTextByColumns(string $text): array
+{
+    $rawLines = explode("\n", $text);
+    $header = '';
+
+    foreach ($rawLines as $line) {
+        if (str_contains($line, 'Game Date') && str_contains($line, 'Player Name') && str_contains($line, 'Current Status')) {
+            $header = $line;
+            break;
+        }
+    }
+
+    if ($header === '') {
+        return [];
+    }
+
+    $datePos = strpos($header, 'Game Date');
+    $timePos = strpos($header, 'Game Time');
+    $matchupPos = strpos($header, 'Matchup');
+    $teamPos = strpos($header, 'Team');
+    $playerPos = strpos($header, 'Player Name');
+    $statusPos = strpos($header, 'Current Status');
+    $reasonPos = strpos($header, 'Reason');
+
+    if ($datePos === false || $timePos === false || $matchupPos === false || $teamPos === false || $playerPos === false || $statusPos === false || $reasonPos === false) {
+        return [];
+    }
+
+    $rows = [];
+    $currentGameDate = '';
+    $currentGameTime = '';
+    $currentMatchup = '';
+    $currentTeam = '';
+    $pending = null;
+    $preReason = [];
+
+    foreach ($rawLines as $rawLine) {
+        $line = rtrim($rawLine);
+        if (trim($line) === '') {
+            continue;
+        }
+
+        if (
+            str_starts_with(trim($line), 'Injury Report:') ||
+            str_starts_with(trim($line), 'Page ') ||
+            str_contains($line, 'Game Date')
+        ) {
+            continue;
+        }
+
+        $dateCol = trim(substr($line, $datePos, max(0, $timePos - $datePos)));
+        $timeCol = trim(substr($line, $timePos, max(0, $matchupPos - $timePos)));
+        $matchupCol = trim(substr($line, $matchupPos, max(0, $teamPos - $matchupPos)));
+        $teamCol = trim(substr($line, $teamPos, max(0, $playerPos - $teamPos)));
+        $playerCol = trim(substr($line, $playerPos, max(0, $statusPos - $playerPos)));
+        $statusCol = trim(substr($line, $statusPos, max(0, $reasonPos - $statusPos)));
+        $reasonCol = trim(substr($line, $reasonPos));
+
+        if (preg_match('/^\d{2}\/\d{2}\/\d{4}$/', $dateCol)) {
+            $currentGameDate = $dateCol;
+        }
+        if (preg_match('/^\d{2}:\d{2}\s+\(ET\)$/', $timeCol)) {
+            $currentGameTime = $timeCol;
+        }
+        if (preg_match('/^[A-Z]{2,3}@[A-Z]{2,3}$/', $matchupCol)) {
+            $currentMatchup = $matchupCol;
+        }
+        if (isset(TEAM_ALIASES[$teamCol])) {
+            $currentTeam = canonicalTeam($teamCol);
+        }
+
+        if ($reasonCol === 'NOT YET SUBMITTED' || $playerCol === 'NOT YET SUBMITTED' || $teamCol === 'NOT YET SUBMITTED') {
+            continue;
+        }
+
+        $hasPlayer = $playerCol !== '';
+        $hasStatus = array_key_exists($statusCol, STATUS_MAP_RU);
+
+        if ($hasPlayer && $hasStatus) {
+            if ($pending !== null) {
+                $rows[] = finalizeOfficialRow($pending);
+                $pending = null;
+            }
+
+            $reasonParts = [];
+            if ($preReason !== []) {
+                $reasonParts = array_merge($reasonParts, $preReason);
+                $preReason = [];
+            }
+            if ($reasonCol !== '') {
+                $reasonParts[] = $reasonCol;
+            }
+
+            $pending = [
+                'player_name' => normalizePlayerName($playerCol),
+                'team' => $currentTeam,
+                'raw_status' => $statusCol,
+                'raw_reason' => trim(implode(' ', $reasonParts)),
+                'report_date' => normalizeSlashDate($currentGameDate),
+                'game_date' => normalizeSlashDate($currentGameDate),
+                'game_time_et' => $currentGameTime,
+                'matchup' => $currentMatchup,
+            ];
+
+            continue;
+        }
+
+        if ($reasonCol !== '') {
+            $startsNewReason = preg_match('/^(Injury\/Illness|Illness|Not With Team)\s*-/i', $reasonCol) === 1;
+            $pendingReason = $pending !== null ? trim((string)$pending['raw_reason']) : '';
+            $pendingNeedsContinuation = $pendingReason !== '' && preg_match('/[;:-]\s*$/u', $pendingReason) === 1;
+
+            if ($pending !== null && (!$startsNewReason || $pendingNeedsContinuation)) {
+                $pending['raw_reason'] = trim($pendingReason . ' ' . $reasonCol);
+            } else {
+                if ($pending !== null) {
+                    $rows[] = finalizeOfficialRow($pending);
+                    $pending = null;
+                }
+                $preReason[] = $reasonCol;
+            }
+        }
+    }
+
+    if ($pending !== null) {
+        $rows[] = finalizeOfficialRow($pending);
+    }
+
+    return dedupeByKey($rows, static fn(array $row): string => buildSourceKey($row['player_name'], $row['team']) . '|' . ($row['report_date'] ?? ''));
+}
+
+function parseOfficialPdfTextFallback(string $text): array
+{
+    $text = str_replace(["\r\n", "\r"], "\n", $text);
     $lines = array_values(array_filter(array_map('trim', explode("\n", $text)), static fn(string $line): bool => $line !== ''));
 
     $rows = [];
@@ -856,7 +999,7 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
         $secondaryCommentRu = translateCommentRu((string)($secondary['comment_raw'] ?? ''));
         $commentRu = buildTableCommentRu((string)$official['raw_status'], $reasonRu, $playerRu, $secondaryCommentRu);
 
-        $manualOverride = manualInjuryOverride((string)$official['player_name'], (string)$official['team']);
+        $manualOverride = manualInjuryOverride((string)$official['player_name'], (string)$official['team'], (string)$official['raw_reason'], (string)$official['raw_status']);
         if ($manualOverride !== null) {
             if (($manualOverride['reason_ru'] ?? '') !== '') {
                 $reasonRu = (string)$manualOverride['reason_ru'];
@@ -878,6 +1021,14 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
 
             $returnSource = 'manual_verified';
             $matchType = $matchType !== '' ? $matchType . '+manual_verified' : 'manual_verified';
+        }
+
+        if ((string)$official['raw_status'] === 'Available') {
+            $reasonRu = '';
+            $reasonDetailRu = '';
+            $reasonSourceRaw = '';
+            $availableSubject = playerShortRu($playerRu);
+            $commentRu = ($availableSubject !== '' ? $availableSubject : 'Игрок') . ' доступен к матчу.';
         }
 
         $sourceComment = $manualOverride !== null ? 'manual_verified' : ($secondary !== null && trim((string)($secondary['comment_raw'] ?? '')) !== '' ? $returnSource : 'fallback');
@@ -1015,27 +1166,19 @@ function pickUniqueSecondaryPlayerMatch(array $rows, string $officialTeam): ?arr
 
 function enrichReasonRaw(string $officialReason, ?array $secondary): string
 {
+    // Статус и причина в таблице должны идти от официального отчёта лиги.
+    // ESPN/CBS оставляем для сроков и дополнительного контекста, но не даём им
+    // перетирать медицинскую причину: иначе можно получить устаревшую «болезнь»
+    // вместо свежего ушиба/травмы из NBA report.
     $official = cleanupOfficialReasonText($officialReason);
+    if ($official !== '' && $official !== '-') {
+        return $officialReason;
+    }
+
     $secondaryReason = trim((string)($secondary['injury_raw'] ?? $secondary['status_hint_raw'] ?? ''));
     $secondaryReason = cleanupOfficialReasonText($secondaryReason);
 
-    if ($official === '') {
-        return $secondaryReason;
-    }
-
-    if ($secondaryReason === '') {
-        return $officialReason;
-    }
-
-    if (hasKnownBodyPartInReason($official)) {
-        return $officialReason;
-    }
-
-    if (hasKnownBodyPartInReason($secondaryReason)) {
-        return trim($secondaryReason . '; ' . $official, " ;\t\n\r\0\x0B");
-    }
-
-    return $officialReason;
+    return $secondaryReason !== '' ? $secondaryReason : $officialReason;
 }
 
 function hasKnownBodyPartInReason(string $reason): bool
@@ -1064,10 +1207,29 @@ function buildReturnInfo(?array $secondary, string $rawStatus): array
     ];
 }
 
-function manualInjuryOverride(string $playerName, string $team): ?array
+function manualInjuryOverride(string $playerName, string $team, string $rawReason = '', string $rawStatus = ''): ?array
 {
     $playerKey = slugify(normalizePlayerName($playerName));
     $teamKey = slugify(canonicalTeam($team));
+    $reasonLower = mb_strtolower(cleanupOfficialReasonText($rawReason), 'UTF-8');
+
+    if ($playerKey === 'joel-embiid' && $teamKey === 'philadelphia-76ers' && str_contains($reasonLower, 'right hip') && str_contains($reasonLower, 'contusion')) {
+        return [
+            'reason_ru' => 'Ушиб правого бедра',
+            'reason_detail_ru' => 'ушиб',
+            'reason_source_raw' => $rawReason,
+            'comment_ru' => 'Эмбиид ожидается в составе. В свежем отчёте лиги указана причина: ушиб правого бедра. Ранее у него также было отмечено восстановление после операции по удалению аппендикса. Финальный статус стоит проверить перед матчем.',
+        ];
+    }
+
+    if ($playerKey === 'jeremy-sochan' && $teamKey === 'new-york-knicks' && str_contains($reasonLower, 'left hamstring')) {
+        return [
+            'reason_ru' => 'Травма левого бедра',
+            'reason_detail_ru' => '',
+            'reason_source_raw' => $rawReason,
+            'comment_ru' => 'Участие Сохана под вопросом. В свежем отчёте лиги указана причина: травма левого бедра. Финальный статус стоит проверить перед матчем.',
+        ];
+    }
 
     $overrides = [
         // Проверенный ручной слой для крупных травм, которые часто не попадают в краткий NBA injury report.
