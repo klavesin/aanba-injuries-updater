@@ -2116,6 +2116,7 @@ function buildBodyDetailReasonPhrase(array $body, ?string $side, string $detail)
         'растяжение мышцы',
         'перелом',
         'воспаление',
+        'воспаление сухожилия',
         'вывих',
         'рассечение',
         'повреждение',
@@ -2131,13 +2132,46 @@ function buildBodyDetailReasonPhrase(array $body, ?string $side, string $detail)
     $gender = (string)$body['gender'];
 
     if ($side === 'bilateral') {
+        if ($detail === 'растяжение мышцы') {
+            return 'Растяжение обеих сторон: ' . $genitive;
+        }
         return upperFirst($detail) . ' обеих сторон: ' . $genitive;
     }
 
     $sideWord = sideAdjectiveRu($side, $gender);
     $bodyPhrase = trim($sideWord . ' ' . $genitive);
 
+    // Не допускаем тавтологию вида "растяжение мышцы левой приводящей мышцы".
+    // Для конкретных мышц звучит нормально: "растяжение левой приводящей мышцы".
+    if ($detail === 'растяжение мышцы') {
+        if (isSpecificMuscleGenitiveRu($genitive)) {
+            return trim('Растяжение ' . $bodyPhrase);
+        }
+
+        if ($genitive === 'бедра') {
+            return trim('Травма ' . $bodyPhrase);
+        }
+
+        if ($genitive === 'паха') {
+            return trim('Растяжение ' . $bodyPhrase);
+        }
+
+        return trim('Растяжение мышц ' . $bodyPhrase);
+    }
+
+    if (($detail === 'повреждение сухожилия' || $detail === 'проблемы с сухожилием') && $genitive === 'ахилла') {
+        return trim(upperFirst($detail) . ' ' . $bodyPhrase);
+    }
+
     return trim(upperFirst($detail) . ' ' . $bodyPhrase);
+}
+
+function isSpecificMuscleGenitiveRu(string $genitive): bool
+{
+    return containsAny(mb_strtolower($genitive, 'UTF-8'), [
+        'мышцы',
+        'мышц',
+    ]);
 }
 
 function sideAdjectiveRu(?string $side, string $gender): string
