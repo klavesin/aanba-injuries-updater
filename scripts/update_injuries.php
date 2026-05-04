@@ -816,22 +816,35 @@ function parseCbsLine(string $line, string $team): ?array
 
 function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
 {
-    $espnIndex = [];
-    foreach ($espnRows as $row) {
-        $espnIndex[buildSourceKey($row['player_name'], $row['team'])] = $row;
-    }
-
-    $cbsIndex = [];
-    foreach ($cbsRows as $row) {
-        $cbsIndex[buildSourceKey($row['player_name'], $row['team'])] = $row;
-    }
+    $espnIndexes = buildSecondaryIndexes($espnRows);
+    $cbsIndexes = buildSecondaryIndexes($cbsRows);
 
     $items = [];
+    $stats = [
+        'espn_exact' => 0,
+        'espn_player_only' => 0,
+        'cbs_exact' => 0,
+        'cbs_player_only' => 0,
+        'fallback' => 0,
+    ];
 
     foreach ($officialRows as $official) {
-        $key = buildSourceKey($official['player_name'], $official['team']);
-        $secondary = $espnIndex[$key] ?? $cbsIndex[$key] ?? null;
-        $returnSource = isset($espnIndex[$key]) ? 'espn' : (isset($cbsIndex[$key]) ? 'cbs' : 'fallback');
+        $match = findSecondaryMatch($official, $espnIndexes, $cbsIndexes);
+        $secondary = $match['row'];
+        $returnSource = $match['source'];
+        $matchType = $match['match_type'];
+
+        if ($returnSource === 'espn' && $matchType === 'exact') {
+            $stats['espn_exact']++;
+        } elseif ($returnSource === 'espn' && $matchType === 'player_only') {
+            $stats['espn_player_only']++;
+        } elseif ($returnSource === 'cbs' && $matchType === 'exact') {
+            $stats['cbs_exact']++;
+        } elseif ($returnSource === 'cbs' && $matchType === 'player_only') {
+            $stats['cbs_player_only']++;
+        } else {
+            $stats['fallback']++;
+        }
 
         $playerRu = playerRu((string)$official['player_name']);
         $reasonSourceRaw = enrichReasonRaw((string)$official['raw_reason'], $secondary);
@@ -844,6 +857,9 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
         if ($commentRu === '') {
             $commentRu = fallbackCommentRu((string)$official['raw_status'], $reasonRu);
         }
+
+        $sourceComment = $secondary !== null && trim((string)($secondary['comment_raw'] ?? '')) !== '' ? $returnSource : 'fallback';
+        $sourceReason = $secondary !== null && trim((string)($secondary['injury_raw'] ?? $secondary['status_hint_raw'] ?? '')) !== '' ? $returnSource : 'official_nba';
 
         $items[] = [
             'id' => buildItemId($official['player_name'], $official['team'], $official['report_date']),
@@ -859,6 +875,9 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
             'raw_reason' => $official['raw_reason'],
             'reason_source_raw' => $reasonSourceRaw,
             'raw_comment' => (string)($secondary['comment_raw'] ?? ''),
+            'secondary_source' => $secondary['source'] ?? '',
+            'secondary_match_type' => $matchType,
+            'secondary_status_hint_raw' => (string)($secondary['status_hint_raw'] ?? ''),
             'status_ru' => translateStatusRu($official['raw_status']),
             'reason_ru' => $reasonRu,
             'reason_detail_ru' => $reasonDetailRu,
@@ -870,6 +889,9 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
             'return_or_reevaluation_ru' => $returnInfo['return_or_reevaluation_ru'],
             'source_status' => 'official_nba',
             'source_return' => $returnSource,
+            'source_reason' => $sourceReason,
+            'source_comment' => $sourceComment,
+            'source_enrichment' => $returnSource !== 'fallback' ? [$returnSource] : [],
             'updated_at' => formatMoscowDateTime(),
             'display' => [
                 'player' => $playerRu,
@@ -883,7 +905,90 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
         ];
     }
 
+    $GLOBALS['enrichment_stats'] = $stats;
+    logLine('INFO', sprintf(
+        'Enrichment merge: ESPN exact=%d, ESPN player_only=%d, CBS exact=%d, CBS player_only=%d, fallback=%d',
+        $stats['espn_exact'],
+        $stats['espn_player_only'],
+        $stats['cbs_exact'],
+        $stats['cbs_player_only'],
+        $stats['fallback']
+    ));
+
     return $items;
+}
+
+function buildSecondaryIndexes(array $rows): array
+{
+    $byExact = [];
+    $byPlayer = [];
+
+    foreach ($rows as $row) {
+        $exactKey = buildSourceKey((string)$row['player_name'], (string)$row['team']);
+        $byExact[$exactKey] = $row;
+
+        $playerKey = buildPlayerMatchKey((string)$row['player_name']);
+        if ($playerKey !== '') {
+            $byPlayer[$playerKey][] = $row;
+        }
+    }
+
+    return [
+        'exact' => $byExact,
+        'player' => $byPlayer,
+    ];
+}
+
+function findSecondaryMatch(array $official, array $espnIndexes, array $cbsIndexes): array
+{
+    $key = buildSourceKey((string)$official['player_name'], (string)$official['team']);
+
+    if (isset($espnIndexes['exact'][$key])) {
+        return ['row' => $espnIndexes['exact'][$key], 'source' => 'espn', 'match_type' => 'exact'];
+    }
+
+    if (isset($cbsIndexes['exact'][$key])) {
+        return ['row' => $cbsIndexes['exact'][$key], 'source' => 'cbs', 'match_type' => 'exact'];
+    }
+
+    $playerKey = buildPlayerMatchKey((string)$official['player_name']);
+    $team = canonicalTeam((string)$official['team']);
+
+    $espnPlayerMatch = pickUniqueSecondaryPlayerMatch($espnIndexes['player'][$playerKey] ?? [], $team);
+    if ($espnPlayerMatch !== null) {
+        return ['row' => $espnPlayerMatch, 'source' => 'espn', 'match_type' => 'player_only'];
+    }
+
+    $cbsPlayerMatch = pickUniqueSecondaryPlayerMatch($cbsIndexes['player'][$playerKey] ?? [], $team);
+    if ($cbsPlayerMatch !== null) {
+        return ['row' => $cbsPlayerMatch, 'source' => 'cbs', 'match_type' => 'player_only'];
+    }
+
+    return ['row' => null, 'source' => 'fallback', 'match_type' => 'none'];
+}
+
+function pickUniqueSecondaryPlayerMatch(array $rows, string $officialTeam): ?array
+{
+    if ($rows === []) {
+        return null;
+    }
+
+    $sameTeam = [];
+    foreach ($rows as $row) {
+        if (canonicalTeam((string)($row['team'] ?? '')) === $officialTeam) {
+            $sameTeam[] = $row;
+        }
+    }
+
+    if (count($sameTeam) === 1) {
+        return $sameTeam[0];
+    }
+
+    if (count($rows) === 1) {
+        return $rows[0];
+    }
+
+    return null;
 }
 
 function enrichReasonRaw(string $officialReason, ?array $secondary): string
@@ -952,18 +1057,45 @@ function fallbackReturnRu(string $rawStatus): string
 function fallbackCommentRu(string $rawStatus, string $reasonRu): string
 {
     $hasReason = $reasonRu !== '' && $reasonRu !== 'Причина уточняется';
-    $reasonLower = $hasReason ? lowerFirstRu($reasonRu) : '';
-    $reasonPart = $hasReason ? ' Причина: ' . $reasonLower . '.' : '';
-    $medicalNote = $hasReason ? ' В отчёте NBA указан медицинский фактор: ' . $reasonLower . '.' : '';
+    $reasonPart = $hasReason ? reasonSentenceRu($reasonRu) : '';
+    $medicalNote = $hasReason ? medicalMarkerSentenceRu($reasonRu) : '';
 
     return match ($rawStatus) {
         'Out' => 'Не сыграет по официальному отчёту NBA; конкретный срок возвращения не указан.' . $reasonPart,
         'Questionable', 'Game-Time Decision' => 'Участие под вопросом; решение ожидается ближе к началу матча.' . $reasonPart,
         'Doubtful' => 'Вероятность участия низкая.' . $reasonPart,
-        'Probable' => 'Ожидается участие, если не будет ухудшения состояния.' . $medicalNote,
+        'Probable' => 'Игрок ожидается в составе.' . $medicalNote,
         'Available' => 'Игрок доступен к матчу.' . $medicalNote,
         default => 'Дополнительные детали в официальном отчёте NBA не указаны.' . $reasonPart,
     };
+}
+
+function reasonSentenceRu(string $reasonRu): string
+{
+    $reasonRu = trim($reasonRu);
+    if ($reasonRu === '' || $reasonRu === 'Причина уточняется') {
+        return '';
+    }
+
+    if ($reasonRu === 'Болезнь') {
+        return ' В отчёте NBA причина указана как болезнь; дополнительные медицинские детали не раскрыты.';
+    }
+
+    return ' Причина: ' . lowerFirstRu($reasonRu) . '.';
+}
+
+function medicalMarkerSentenceRu(string $reasonRu): string
+{
+    $reasonRu = trim($reasonRu);
+    if ($reasonRu === '' || $reasonRu === 'Причина уточняется') {
+        return '';
+    }
+
+    if ($reasonRu === 'Болезнь') {
+        return ' В отчёте NBA сохранена медицинская пометка: болезнь.';
+    }
+
+    return ' В отчёте NBA сохранена медицинская пометка: ' . lowerFirstRu($reasonRu) . '.';
 }
 
 function buildPayload(array $items, int $officialCount, int $espnCount, int $cbsCount, ?string $officialPdfUrl): array
@@ -980,10 +1112,10 @@ function buildPayload(array $items, int $officialCount, int $espnCount, int $cbs
         'meta' => [
             'timezone' => 'Europe/Moscow',
             'generated_at' => $updatedAt,
-            'schema_version' => '1.1.1',
+            'schema_version' => '1.2.0',
             'primary_status_source' => 'official_nba',
             'return_source_priority' => ['espn', 'cbs', 'fallback_by_status'],
-            'translation_mode' => 'short_ru_reason_with_player_transliteration_fallback',
+            'translation_mode' => 'ru_reason_with_external_context_and_player_dictionary',
             'status_map' => STATUS_MAP_RU,
             'notes' => [
                 'Официальный NBA injury report — основной источник правды для статуса и причины.',
@@ -997,6 +1129,7 @@ function buildPayload(array $items, int $officialCount, int $espnCount, int $cbs
                 'official_rows' => $officialCount,
                 'espn_rows' => $espnCount,
                 'cbs_rows' => $cbsCount,
+                'enrichment_merge' => $GLOBALS['enrichment_stats'] ?? [],
             ],
         ],
         'items' => $items,
@@ -1452,7 +1585,11 @@ function buildReasonRu(string $reason): array
         return ['reason_ru' => 'G League', 'reason_detail_ru' => ''];
     }
 
-    if (containsAny($lower, ['illness', 'non-covid illness', 'sick'])) {
+    if (containsAny($lower, ['flu-like', 'flu like', 'flu symptoms'])) {
+        return ['reason_ru' => 'Симптомы болезни', 'reason_detail_ru' => ''];
+    }
+
+    if (containsAny($lower, ['illness', 'non-covid illness', 'sick', 'flu', 'virus', 'viral'])) {
         return ['reason_ru' => 'Болезнь', 'reason_detail_ru' => ''];
     }
 
@@ -1721,33 +1858,69 @@ function translateCommentRu(string $comment): string
         return '';
     }
 
-    $patterns = [
-        '/Will be re-evaluated in one week/i' => 'Повторный осмотр через 1 неделю',
-        '/Will be re-evaluated in two weeks/i' => 'Повторный осмотр через 2 недели',
-        '/will be re-evaluated/i' => 'Планируется повторный осмотр',
-        '/expected to miss at least one week/i' => 'Ожидается пропуск как минимум одной недели',
-        '/expected to miss at least two weeks/i' => 'Ожидается пропуск как минимум двух недель',
-        '/is questionable for/i' => 'Участие под вопросом',
-        '/questionable for/i' => 'Участие под вопросом',
-        '/doubtful for/i' => 'Скорее не сыграет',
-        '/probable for/i' => 'Скорее сыграет',
-        '/expected to play/i' => 'Ожидается участие',
-        '/available for/i' => 'Игрок доступен к матчу',
-        '/has been ruled out/i' => 'Не сыграет',
-        '/will not play/i' => 'Не сыграет',
-        '/out for/i' => 'Не сыграет',
-    ];
-
-    foreach ($patterns as $pattern => $replacement) {
-        if (preg_match($pattern, $comment)) {
-            return $replacement;
-        }
-    }
+    $cleanComment = preg_replace('/^[A-Z][a-z]{2}\s+\d{1,2}:\s*/', '', $comment) ?? $comment;
+    $cleanComment = trim($cleanComment);
+    $lower = mb_strtolower($comment, 'UTF-8');
 
     if (preg_match('/Expected to be out until at least\s+([A-Z][a-z]{2}\s+\d{1,2})/i', $comment, $m)) {
         $dateRu = monthDayToRu($m[1]);
 
         return $dateRu !== '' ? 'Ожидается отсутствие как минимум до ' . $dateRu : 'Срок возвращения уточняется';
+    }
+
+    if (preg_match('/will be re-evaluated in one week/i', $comment)) {
+        return 'Повторный осмотр через 1 неделю';
+    }
+
+    if (preg_match('/will be re-evaluated in two weeks/i', $comment)) {
+        return 'Повторный осмотр через 2 недели';
+    }
+
+    if (preg_match('/will be re-evaluated/i', $comment)) {
+        return 'Планируется повторный осмотр';
+    }
+
+    if (preg_match('/expected to miss at least one week/i', $comment)) {
+        return 'Ожидается пропуск как минимум одной недели';
+    }
+
+    if (preg_match('/expected to miss at least two weeks/i', $comment)) {
+        return 'Ожидается пропуск как минимум двух недель';
+    }
+
+    if (preg_match('/expected to play|is expected to play|should play|will play/i', $comment)) {
+        return 'Ожидается участие, если не будет ухудшения состояния.';
+    }
+
+    if (preg_match('/available for/i', $comment)) {
+        return 'Игрок доступен к матчу.';
+    }
+
+    if (preg_match('/probable for/i', $comment)) {
+        return 'Скорее всего сыграет; финальное подтверждение ближе к матчу.';
+    }
+
+    if (preg_match('/is questionable for|questionable for/i', $comment)) {
+        if (containsAny($lower, ['illness', 'sick', 'flu'])) {
+            return 'Участие под вопросом из-за болезни; решение ожидается ближе к началу матча.';
+        }
+        return 'Участие под вопросом; решение ожидается ближе к началу матча.';
+    }
+
+    if (preg_match('/doubtful for/i', $comment)) {
+        return 'Скорее не сыграет; вероятность участия низкая.';
+    }
+
+    if (preg_match('/game-time decision/i', $comment)) {
+        return 'Решение будет принято ближе к началу матча.';
+    }
+
+    if (preg_match('/day-to-day/i', $comment)) {
+        return 'Статус day-to-day; состояние оценивается ежедневно.';
+    }
+
+    if (preg_match('/has been ruled out|will not play|out for/i', $comment)) {
+        return 'Не сыграет.';
     }
 
     return '';
@@ -1840,9 +2013,19 @@ function extractFullNameFromMixedString(string $value): string
     return '';
 }
 
+function buildPlayerMatchKey(string $playerName): string
+{
+    $name = normalizePlayerName($playerName);
+    $name = preg_replace('/\s+\(.*?\)$/u', '', $name) ?? $name;
+    $name = preg_replace('/\b(Jr\.?|Sr\.?|II|III|IV|V)\b/i', '', $name) ?? $name;
+    $name = preg_replace('/\s+/u', ' ', $name) ?? $name;
+
+    return slugify(trim($name));
+}
+
 function buildSourceKey(string $playerName, string $team): string
 {
-    return slugify(normalizePlayerName($playerName)) . '|' . slugify(canonicalTeam($team));
+    return buildPlayerMatchKey($playerName) . '|' . slugify(canonicalTeam($team));
 }
 
 function buildItemId(string $playerName, string $team, string $date): string
