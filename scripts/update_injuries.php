@@ -858,8 +858,32 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
             $commentRu = fallbackCommentRu((string)$official['raw_status'], $reasonRu);
         }
 
-        $sourceComment = $secondary !== null && trim((string)($secondary['comment_raw'] ?? '')) !== '' ? $returnSource : 'fallback';
-        $sourceReason = $secondary !== null && trim((string)($secondary['injury_raw'] ?? $secondary['status_hint_raw'] ?? '')) !== '' ? $returnSource : 'official_nba';
+        $manualOverride = manualInjuryOverride((string)$official['player_name'], (string)$official['team']);
+        if ($manualOverride !== null) {
+            if (($manualOverride['reason_ru'] ?? '') !== '') {
+                $reasonRu = (string)$manualOverride['reason_ru'];
+                $reasonDetailRu = (string)($manualOverride['reason_detail_ru'] ?? '');
+                $reasonSourceRaw = (string)($manualOverride['reason_source_raw'] ?? $reasonSourceRaw);
+            }
+
+            if (($manualOverride['return_or_reevaluation_ru'] ?? '') !== '') {
+                $returnInfo['estimated_return_date_raw'] = (string)($manualOverride['estimated_return_date_raw'] ?? 'manual');
+                $returnInfo['estimated_return_date_ru'] = (string)$manualOverride['return_or_reevaluation_ru'];
+                $returnInfo['reevaluation_raw'] = '';
+                $returnInfo['reevaluation_ru'] = '';
+                $returnInfo['return_or_reevaluation_ru'] = (string)$manualOverride['return_or_reevaluation_ru'];
+            }
+
+            if (($manualOverride['comment_ru'] ?? '') !== '') {
+                $commentRu = (string)$manualOverride['comment_ru'];
+            }
+
+            $returnSource = 'manual_verified';
+            $matchType = $matchType !== '' ? $matchType . '+manual_verified' : 'manual_verified';
+        }
+
+        $sourceComment = $manualOverride !== null ? 'manual_verified' : ($secondary !== null && trim((string)($secondary['comment_raw'] ?? '')) !== '' ? $returnSource : 'fallback');
+        $sourceReason = $manualOverride !== null && (($manualOverride['reason_ru'] ?? '') !== '') ? 'manual_verified' : ($secondary !== null && trim((string)($secondary['injury_raw'] ?? $secondary['status_hint_raw'] ?? '')) !== '' ? $returnSource : 'official_nba');
 
         $items[] = [
             'id' => buildItemId($official['player_name'], $official['team'], $official['report_date']),
@@ -1042,6 +1066,27 @@ function buildReturnInfo(?array $secondary, string $rawStatus): array
     ];
 }
 
+function manualInjuryOverride(string $playerName, string $team): ?array
+{
+    $playerKey = slugify(normalizePlayerName($playerName));
+    $teamKey = slugify(canonicalTeam($team));
+
+    $overrides = [
+        // Проверенный ручной слой для крупных травм, которые часто не попадают в краткий NBA injury report.
+        // Статус NBA не перебиваем, но уточняем причину/срок/комментарий для интерфейса.
+        'donte-divincenzo|minnesota-timberwolves' => [
+            'reason_ru' => 'Разрыв правого ахилла',
+            'reason_detail_ru' => 'разрыв ахилла',
+            'reason_source_raw' => 'Right Achilles tendon rupture',
+            'return_or_reevaluation_ru' => 'До конца сезона',
+            'estimated_return_date_raw' => 'out for season',
+            'comment_ru' => 'Не сыграет до конца сезона; ожидается длительное восстановление после разрыва правого ахилла.',
+        ],
+    ];
+
+    return $overrides[$playerKey . '|' . $teamKey] ?? $overrides[$playerKey . '|'] ?? null;
+}
+
 function fallbackReturnRu(string $rawStatus): string
 {
     return match ($rawStatus) {
@@ -1121,6 +1166,7 @@ function buildPayload(array $items, int $officialCount, int $espnCount, int $cbs
                 'Официальный NBA injury report — основной источник правды для статуса и причины.',
                 'ESPN используется для даты возврата, повторного осмотра и комментария, если данные доступны.',
                 'CBS используется как fallback, если у ESPN нет return info.',
+                'Для крупных долгосрочных травм может применяться ручной проверенный override, не меняющий официальный NBA-статус.',
                 'Если ESPN/CBS недоступны, сроки и комментарии не выдумываются: используется честный fallback по official NBA status.',
                 'Оригинальные поля NBA сохраняются в raw_reason/raw_comment.',
             ],
@@ -1616,15 +1662,18 @@ function buildReasonRu(string $reason): array
     $body = findBodyPartInfo($lower);
     $side = findSideInfo($lowerRaw);
     $details = findInjuryDetailsRu($lowerRaw);
-    $detail = implode(', ', $details);
 
     if ($body !== null) {
+        $detailsForBody = filterDetailsForBodyReason($details);
+        $detail = implode(', ', $detailsForBody);
         $reasonRu = buildBodyReasonPhrase($body, $side);
         if ($detail !== '') {
             $reasonRu .= ' — ' . $detail;
         }
         return ['reason_ru' => $reasonRu, 'reason_detail_ru' => $detail];
     }
+
+    $detail = implode(', ', $details);
 
     if ($details !== []) {
         $reasonRu = upperFirst($detail);
@@ -1746,7 +1795,7 @@ function findInjuryDetailsRu(string $lower): array
         'strain' => 'растяжение мышцы',
         'contusion' => 'ушиб',
         'bruise' => 'ушиб',
-        'soreness' => 'болезненность',
+        'soreness' => 'дискомфорт',
         'pain' => 'боль',
         'tightness' => 'зажатость',
         'inflammation' => 'воспаление',
@@ -1774,6 +1823,22 @@ function findInjuryDetailsRu(string $lower): array
     return $details;
 }
 
+function filterDetailsForBodyReason(array $details): array
+{
+    // Если часть тела уже указана, не добавляем слабые/размытые уточнения вроде soreness.
+    // Было: "Травма правой икроножной мышцы — болезненность".
+    // Стало: "Травма правой икроножной мышцы".
+    $generic = [
+        'болезненность',
+        'дискомфорт',
+        'боль',
+        'зажатость',
+        'мышечная травма',
+    ];
+
+    return array_values(array_filter($details, static fn(string $detail): bool => !in_array($detail, $generic, true)));
+}
+
 function findInjuryDetailRu(string $lower): string
 {
     $details = findInjuryDetailsRu($lower);
@@ -1788,6 +1853,7 @@ function needsUnknownAreaNoteRu(array $details): bool
         'растяжение связок',
         'мышечная травма',
         'болезненность',
+        'дискомфорт',
         'боль',
         'ушиб',
         'воспаление',
@@ -1861,6 +1927,14 @@ function translateCommentRu(string $comment): string
     $cleanComment = preg_replace('/^[A-Z][a-z]{2}\s+\d{1,2}:\s*/', '', $comment) ?? $comment;
     $cleanComment = trim($cleanComment);
     $lower = mb_strtolower($comment, 'UTF-8');
+
+    if (preg_match('/out for (the )?(remainder of the )?season|season is over|done for (the )?season|ruled out for (the )?season/i', $comment)) {
+        return 'Не сыграет до конца сезона.';
+    }
+
+    if (preg_match('/ruptured? .*achilles|torn .*achilles|achilles .*tear/i', $comment)) {
+        return 'Серьёзная травма ахилла; ожидается длительное восстановление.';
+    }
 
     if (preg_match('/Expected to be out until at least\s+([A-Z][a-z]{2}\s+\d{1,2})/i', $comment, $m)) {
         $dateRu = monthDayToRu($m[1]);
@@ -1949,6 +2023,14 @@ function extractReturnDateRu(string $estimatedReturnRaw, string $commentRaw): st
         if ($dateRu !== '') {
             return $dateRu;
         }
+    }
+
+    if (preg_match('/out for (the )?(remainder of the )?season|season is over|done for (the )?season|ruled out for (the )?season/i', $commentRaw)) {
+        return 'До конца сезона';
+    }
+
+    if (preg_match('/ruptured? .*achilles|torn .*achilles|achilles .*tear/i', $commentRaw)) {
+        return 'До конца сезона';
     }
 
     if (preg_match('/Expected to be out until at least\s+([A-Z][a-z]{2}\s+\d{1,2})/i', $commentRaw, $m)) {
