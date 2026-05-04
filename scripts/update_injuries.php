@@ -131,6 +131,10 @@ const PLAYER_RU_MAP = [
     'Bobby Portis' => 'Бобби Портис',
     'Joel Embiid' => 'Джоэл Эмбиид',
     'Tyrese Maxey' => 'Тайриз Макси',
+    'Ayo Dosunmu' => 'Айо Досунму',
+    'Jeremy Sochan' => 'Джереми Сохан',
+    'Donte DiVincenzo' => 'Донте Дивинченцо',
+    'Carter Bryant' => 'Картер Брайант',
     'Paul George' => 'Пол Джордж',
     'Kyle Lowry' => 'Кайл Лаури',
     'Kelly Oubre Jr.' => 'Келли Убре мл.',
@@ -1024,11 +1028,19 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
         }
 
         if ((string)$official['raw_status'] === 'Available') {
-            $reasonRu = '';
+            $availableReasonSourceRaw = $reasonSourceRaw;
+            $availableReasonRu = $reasonRu;
+            $availableMedicalMarkerRu = availableMedicalMarkerRu($availableReasonSourceRaw, $availableReasonRu);
+
+            // Игрок уже допущен к матчу, поэтому в пользовательской колонке "Причина"
+            // показываем не медицинскую историю, а отсутствие причины ограничения.
+            // Саму медицинскую пометку сохраняем мягко в комментарии.
+            $reasonRu = '—';
             $reasonDetailRu = '';
-            $reasonSourceRaw = '';
+            $reasonSourceRaw = $availableReasonSourceRaw;
+
             $availableSubject = playerShortRu($playerRu);
-            $commentRu = ($availableSubject !== '' ? $availableSubject : 'Игрок') . ' доступен к матчу.';
+            $commentRu = buildAvailableCommentRu($availableSubject !== '' ? $availableSubject : 'Игрок', $availableMedicalMarkerRu);
         }
 
         $sourceComment = $manualOverride !== null ? 'manual_verified' : ($secondary !== null && trim((string)($secondary['comment_raw'] ?? '')) !== '' ? $returnSource : 'fallback');
@@ -1342,6 +1354,125 @@ function medicalMarkerSentenceRu(string $reasonRu): string
     }
 
     return ' В свежем отчёте лиги указана причина: ' . lowerFirstRu($reasonRu) . '.';
+}
+
+function buildAvailableCommentRu(string $subject, string $medicalMarkerRu = ''): string
+{
+    $subject = trim($subject) !== '' ? trim($subject) : 'Игрок';
+    $medicalMarkerRu = trim($medicalMarkerRu);
+
+    if ($medicalMarkerRu === '') {
+        return $subject . ' доступен к матчу.';
+    }
+
+    return $subject . ' доступен к матчу. В отчёте лиги есть медицинская пометка ' . $medicalMarkerRu . ', но ограничений по участию не заявлено.';
+}
+
+function availableMedicalMarkerRu(string $rawReason, string $reasonRu = ''): string
+{
+    $clean = cleanupOfficialReasonText($rawReason);
+    $lower = mb_strtolower($clean, 'UTF-8');
+    $reasonLower = mb_strtolower(trim($reasonRu), 'UTF-8');
+
+    if ($clean === '' || trim($reasonRu) === '' || trim($reasonRu) === '—' || trim($reasonRu) === 'Причина уточняется') {
+        return '';
+    }
+
+    // Для доступных игроков не выносим наружу болезни, отдых, личные причины и служебные пометки:
+    // в таблице важнее факт, что игрок уже допущен к матчу.
+    if (containsAny($reasonLower . ' ' . $lower, [
+        'болезнь',
+        'симптомы болезни',
+        'illness',
+        'personal',
+        'личные причины',
+        'rest',
+        'отдых',
+        'g league',
+        'джи-лига',
+        'контроль нагрузки',
+        'набор игровых кондиций',
+    ])) {
+        return '';
+    }
+
+    $body = findBodyPartInfo($lower);
+    $side = findSideInfo($lower);
+
+    if ($body === null) {
+        return '';
+    }
+
+    $area = bodyAreaDativeRu($body, $side);
+    if ($area === '') {
+        return '';
+    }
+
+    return 'по ' . $area;
+}
+
+function bodyAreaDativeRu(array $body, ?string $side): string
+{
+    $genitive = (string)($body['genitive'] ?? '');
+    $gender = (string)($body['gender'] ?? '');
+
+    if ($genitive === '' || $gender === 'pl') {
+        return '';
+    }
+
+    $dativeMap = [
+        'поясницы' => 'пояснице',
+        'голеностопа' => 'голеностопу',
+        'голени' => 'голени',
+        'большеберцовой кости' => 'большеберцовой кости',
+        'бедра' => 'бедру',
+        'икроножной мышцы' => 'икроножной мышце',
+        'четырёхглавой мышцы бедра' => 'четырёхглавой мышце бедра',
+        'приводящей мышцы' => 'приводящей мышце',
+        'косой мышцы корпуса' => 'косой мышце корпуса',
+        'паха' => 'паху',
+        'колена' => 'колену',
+        'стопы' => 'стопе',
+        'пальца ноги' => 'пальцу ноги',
+        'спины' => 'спине',
+        'плеча' => 'плечу',
+        'локтя' => 'локтю',
+        'запястья' => 'запястью',
+        'кисти' => 'кисти',
+        'пальца руки' => 'пальцу руки',
+        'большого пальца руки' => 'большому пальцу руки',
+        'шеи' => 'шее',
+        'ахилла' => 'ахиллу',
+        'лица' => 'лицу',
+        'носа' => 'носу',
+        'глаза' => 'глазу',
+        'головы' => 'голове',
+        'мышц корпуса' => 'мышцам корпуса',
+    ];
+
+    $bodyDative = $dativeMap[$genitive] ?? '';
+    if ($bodyDative === '') {
+        return '';
+    }
+
+    $sideWord = sideAdjectiveDativeRu($side, $gender);
+
+    return trim($sideWord . ' ' . $bodyDative);
+}
+
+function sideAdjectiveDativeRu(?string $side, string $gender): string
+{
+    if ($side === null || $gender === 'pl') {
+        return '';
+    }
+
+    return match ($side . ':' . $gender) {
+        'left:m', 'left:n' => 'левому',
+        'left:f' => 'левой',
+        'right:m', 'right:n' => 'правому',
+        'right:f' => 'правой',
+        default => '',
+    };
 }
 
 function buildPayload(array $items, int $officialCount, int $espnCount, int $cbsCount, ?string $officialPdfUrl): array
