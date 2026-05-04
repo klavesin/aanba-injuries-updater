@@ -1995,6 +1995,18 @@ function buildReasonRu(string $reason): array
         return ['reason_ru' => 'Отдых', 'reason_detail_ru' => ''];
     }
 
+    if (containsAny($lower, ['suspension', 'suspended'])) {
+        return ['reason_ru' => 'Дисквалификация', 'reason_detail_ru' => ''];
+    }
+
+    if (containsAny($lower, ["coach's decision", 'coaches decision', 'coach decision'])) {
+        return ['reason_ru' => 'Решение тренера', 'reason_detail_ru' => ''];
+    }
+
+    if (containsAny($lower, ['not injury related', 'not injury-related', 'non-injury related', 'non injury related'])) {
+        return ['reason_ru' => 'Не связано с травмой', 'reason_detail_ru' => ''];
+    }
+
     if (containsAny($lower, ['injury management', 'maintenance', 'load management'])) {
         return ['reason_ru' => 'Контроль нагрузки', 'reason_detail_ru' => ''];
     }
@@ -2003,8 +2015,12 @@ function buildReasonRu(string $reason): array
         return ['reason_ru' => 'Набор игровых кондиций', 'reason_detail_ru' => ''];
     }
 
+    if (containsAny($lower, ['concussion protocol'])) {
+        return ['reason_ru' => 'Протокол сотрясения мозга', 'reason_detail_ru' => ''];
+    }
+
     if (containsAny($lower, ['concussion'])) {
-        return ['reason_ru' => 'Сотрясение', 'reason_detail_ru' => ''];
+        return ['reason_ru' => 'Сотрясение мозга', 'reason_detail_ru' => ''];
     }
 
     $body = findBodyPartInfo($lower);
@@ -2013,7 +2029,7 @@ function buildReasonRu(string $reason): array
 
     if ($body !== null) {
         $detailsForBody = filterDetailsForBodyReason($details);
-        $detail = implode(', ', $detailsForBody);
+        $detail = pickPrimaryDetailForBody($detailsForBody);
         $reasonRu = buildBodyReasonPhrase($body, $side);
         if ($detail !== '') {
             $fanFriendlyReason = buildBodyDetailReasonPhrase($body, $side, $detail);
@@ -2075,6 +2091,10 @@ function findBodyPartInfo(string $lower): ?array
         ['keys' => ['adductor'], 'genitive' => 'приводящей мышцы', 'gender' => 'f'],
         ['keys' => ['oblique'], 'genitive' => 'косой мышцы корпуса', 'gender' => 'f'],
         ['keys' => ['groin'], 'genitive' => 'паха', 'gender' => 'm'],
+        ['keys' => ['acl', 'anterior cruciate ligament'], 'genitive' => 'передней крестообразной связки', 'gender' => 'f'],
+        ['keys' => ['mcl', 'medial collateral ligament'], 'genitive' => 'медиальной коллатеральной связки', 'gender' => 'f'],
+        ['keys' => ['meniscus'], 'genitive' => 'мениска', 'gender' => 'm'],
+        ['keys' => ['patella'], 'genitive' => 'надколенника', 'gender' => 'm'],
         ['keys' => ['knee'], 'genitive' => 'колена', 'gender' => 'n'],
         ['keys' => ['ankle'], 'genitive' => 'голеностопа', 'gender' => 'm'],
         ['keys' => ['foot'], 'genitive' => 'стопы', 'gender' => 'f'],
@@ -2090,6 +2110,8 @@ function findBodyPartInfo(string $lower): ?array
         ['keys' => ['neck'], 'genitive' => 'шеи', 'gender' => 'f'],
         ['keys' => ['achilles'], 'genitive' => 'ахилла', 'gender' => 'm'],
         ['keys' => ['rib', 'ribs'], 'genitive' => 'рёбер', 'gender' => 'pl'],
+        ['keys' => ['orbital', 'orbit'], 'genitive' => 'орбитальной кости', 'gender' => 'f'],
+        ['keys' => ['jaw'], 'genitive' => 'челюсти', 'gender' => 'f'],
         ['keys' => ['face'], 'genitive' => 'лица', 'gender' => 'n'],
         ['keys' => ['nose'], 'genitive' => 'носа', 'gender' => 'm'],
         ['keys' => ['eye'], 'genitive' => 'глаза', 'gender' => 'm'],
@@ -2114,7 +2136,9 @@ function buildBodyDetailReasonPhrase(array $body, ?string $side, string $detail)
         'ушиб',
         'растяжение связок',
         'растяжение мышцы',
+        'разрыв',
         'перелом',
+        'шинсплинт',
         'воспаление',
         'воспаление сухожилия',
         'вывих',
@@ -2140,6 +2164,14 @@ function buildBodyDetailReasonPhrase(array $body, ?string $side, string $detail)
 
     $sideWord = sideAdjectiveRu($side, $gender);
     $bodyPhrase = trim($sideWord . ' ' . $genitive);
+
+    if ($detail === 'шинсплинт') {
+        return trim('Шинсплинт ' . $bodyPhrase);
+    }
+
+    if ($detail === 'разрыв') {
+        return trim('Разрыв ' . $bodyPhrase);
+    }
 
     // Не допускаем тавтологию вида "растяжение мышцы левой приводящей мышцы".
     // Для конкретных мышц звучит нормально: "растяжение левой приводящей мышцы".
@@ -2217,6 +2249,9 @@ function findInjuryDetailsRu(string $lower): array
         'surgery' => 'после операции',
         'fracture' => 'перелом',
         'broken' => 'перелом',
+        'rupture' => 'разрыв',
+        'ruptured' => 'разрыв',
+        'torn' => 'разрыв',
         'sprain' => 'растяжение связок',
         'strain' => 'растяжение мышцы',
         'contusion' => 'ушиб',
@@ -2231,7 +2266,7 @@ function findInjuryDetailsRu(string $lower): array
         'tendon' => 'повреждение сухожилия',
         'dislocation' => 'вывих',
         'laceration' => 'рассечение',
-        'tear' => 'повреждение',
+        'tear' => 'разрыв',
         'muscle' => 'мышечная травма',
     ];
 
@@ -2247,6 +2282,40 @@ function findInjuryDetailsRu(string $lower): array
     }
 
     return $details;
+}
+
+
+function pickPrimaryDetailForBody(array $details): string
+{
+    if ($details === []) {
+        return '';
+    }
+
+    // В NBA report иногда прилетает несколько уточнений через запятую.
+    // Для колонки "Причина" выбираем самое смысловое, чтобы не получать
+    // тяжёлые формулировки вроде "шинсплинт, растяжение мышцы, повреждение сухожилия".
+    $priority = [
+        'разрыв',
+        'перелом',
+        'вывих',
+        'растяжение связок',
+        'растяжение мышцы',
+        'воспаление сухожилия',
+        'воспаление',
+        'шинсплинт',
+        'ушиб',
+        'повреждение сухожилия',
+        'проблемы с сухожилием',
+        'повреждение',
+    ];
+
+    foreach ($priority as $detail) {
+        if (in_array($detail, $details, true)) {
+            return $detail;
+        }
+    }
+
+    return $details[0];
 }
 
 function filterDetailsForBodyReason(array $details): array
