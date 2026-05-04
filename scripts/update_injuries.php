@@ -914,7 +914,7 @@ function parseEspnLine(string $line, string $team): ?array
     }
 
     $estimatedReturnRaw = '';
-    if (preg_match('/^(Out for season|No timetable|TBD|Day-To-Day|Game-Time Decision|(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2})\b/u', $prefix, $returnMatch)) {
+    if (preg_match('/^(Out for (?:the )?season|No timetable(?: available)?|TBD|Day-To-Day|Game-Time Decision|(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2})\b/iu', $prefix, $returnMatch)) {
         $estimatedReturnRaw = trim($returnMatch[1]);
         $prefix = trim(substr($prefix, strlen($estimatedReturnRaw)));
     }
@@ -935,7 +935,7 @@ function parseCbsLine(string $line, string $team): ?array
 {
     $line = preg_replace('/([A-Za-z])([A-Z][a-z])/', '$1 $2', $line) ?? $line;
 
-    if (!preg_match('/^(?<name>.+?)\s+(?<pos>PG|SG|SF|PF|C|G|F)\s+(?<updated>[A-Z][a-z]{2},\s+[A-Z][a-z]{2}\s+\d{1,2})\s+(?<injury>.+?)\s+(?<status>Expected to be out until at least\s+[A-Z][a-z]{2}\s+\d{1,2}|Out for season|No timetable available|Day-To-Day|Game-Time Decision|Questionable|Probable|Doubtful|Available)$/u', $line, $m)) {
+    if (!preg_match('/^(?<name>.+?)\s+(?<pos>PG|SG|SF|PF|C|G|F)\s+(?<updated>[A-Z][a-z]{2},\s+[A-Z][a-z]{2}\s+\d{1,2})\s+(?<injury>.+?)\s+(?<status>Expected to be out until at least\s+[A-Z][a-z]{2}\s+\d{1,2}|Out for (?:the )?season|Out indefinitely|No timetable(?: available)?|Day-To-Day|Game-Time Decision|Questionable|Probable|Doubtful|Available)$/iu', $line, $m)) {
         return null;
     }
 
@@ -947,6 +947,10 @@ function parseCbsLine(string $line, string $team): ?array
     $estimatedReturnRaw = '';
     if (preg_match('/Expected to be out until at least\s+([A-Z][a-z]{2}\s+\d{1,2})/u', $m['status'], $returnMatch)) {
         $estimatedReturnRaw = trim($returnMatch[1]);
+    } elseif (hasSeasonEndingSignal((string)$m['status'])) {
+        $estimatedReturnRaw = 'Out for season';
+    } elseif (preg_match('/out indefinitely|no timetable/i', (string)$m['status'])) {
+        $estimatedReturnRaw = 'No timetable';
     }
 
     return [
@@ -1010,6 +1014,10 @@ function mergeRows(array $officialRows, array $espnRows, array $cbsRows): array
         $returnInfo = buildReturnInfo($secondary, $rawStatus);
         $secondaryCommentRu = translateCommentRu((string)($secondary['comment_raw'] ?? ''));
         $commentRu = buildTableCommentRu($rawStatus, $reasonRu, $playerRu, $secondaryCommentRu);
+
+        if (!$isAvailableOfficial && $rawStatus === 'Out' && (($returnInfo['return_or_reevaluation_ru'] ?? '') === 'До конца сезона')) {
+            $commentRu = buildSeasonEndingCommentRu($playerRu, $reasonRu);
+        }
 
         // Ручные override-правки не должны перебивать официальный статус Available.
         $manualOverride = $isAvailableOfficial ? null : manualInjuryOverride((string)$official['player_name'], (string)$official['team'], (string)$official['raw_reason'], $rawStatus);
@@ -1487,6 +1495,7 @@ function buildPayload(array $items, int $officialCount, int $espnCount, int $cbs
 
     return [
         'site_title' => 'Травмы игроков NBA',
+        'site_subtitle' => 'Статусы игроков перед ближайшими матчами NBA. Кто сыграет, кто пропустит, причины и сроки возвращения.',
         'last_updated' => $updatedAt,
         'status' => 'ok',
         'source_label' => 'NBA + ESPN/CBS',
@@ -1497,13 +1506,14 @@ function buildPayload(array $items, int $officialCount, int $espnCount, int $cbs
             'generated_at' => $updatedAt,
             'schema_version' => '1.2.0',
             'primary_status_source' => 'official_nba',
-            'return_source_priority' => ['espn', 'cbs', 'fallback_by_status'],
+            'return_source_priority' => ['espn', 'cbs', 'automatic_long_term_status', 'fallback_by_status'],
             'translation_mode' => 'ru_reason_with_external_context_and_player_dictionary',
             'status_map' => STATUS_MAP_RU,
             'notes' => [
                 'Официальный NBA injury report — основной источник правды для статуса и причины.',
                 'ESPN используется для даты возврата, повторного осмотра и комментария, если данные доступны.',
                 'CBS используется как fallback, если у ESPN нет return info.',
+                'Срок “до конца сезона” подтягивается автоматически из ESPN/CBS при совпадении игрока и команды и не применяется к статусу “Доступен к игре”.',
                 'Для крупных долгосрочных травм может применяться ручной проверенный override, не меняющий официальный NBA-статус.',
                 'Если ESPN/CBS недоступны, сроки и комментарии не выдумываются: используется честный fallback по official NBA status.',
                 'Оригинальные поля NBA сохраняются в raw_reason/raw_comment.',
@@ -2360,6 +2370,53 @@ function translateReasonRu(string $reason): string
     return buildReasonRu($reason)['reason_ru'];
 }
 
+
+function hasSeasonEndingSignal(string $value): bool
+{
+    $value = trim($value);
+    if ($value === '') {
+        return false;
+    }
+
+    return (bool)preg_match('/\b(out for (?:the )?(?:remainder of (?:the )?)?season|season(?:-| )ending|season is over|done for (?:the )?season|done for (?:the )?year|ruled out for (?:the )?season|will miss (?:the )?(?:remainder|rest) of (?:the )?season|expected to miss (?:the )?(?:remainder|rest) of (?:the )?season|miss(?:es|ing)? (?:the )?(?:remainder|rest) of (?:the )?season|shut down for (?:the )?season|won\'t return this season|will not return this season|not expected to return this season|unlikely to return this season|remainder of (?:the )?campaign|rest of (?:the )?campaign|campaign is over)\b/i', $value);
+}
+
+function hasMajorRecoverySignalRu(string $reasonRu): bool
+{
+    $lower = mb_strtolower(trim($reasonRu), 'UTF-8');
+    if ($lower === '') {
+        return false;
+    }
+
+    return containsAny($lower, [
+        'разрыв',
+        'перелом',
+        'операц',
+        'ахилл',
+        'крестообразн',
+        'мениск',
+    ]);
+}
+
+function buildSeasonEndingCommentRu(string $playerRu, string $reasonRu): string
+{
+    $subject = playerShortRu($playerRu);
+    $subject = $subject !== '' ? $subject : 'Игрок';
+
+    $reasonRu = trim($reasonRu);
+    $hasReason = $reasonRu !== '' && $reasonRu !== '—' && $reasonRu !== 'Причина уточняется';
+
+    if ($hasReason && hasMajorRecoverySignalRu($reasonRu)) {
+        return $subject . ' не сыграет до конца сезона; ожидается длительное восстановление после ' . lowerFirstRu($reasonRu) . '.';
+    }
+
+    if ($hasReason) {
+        return $subject . ' не сыграет до конца сезона. В отчёте лиги указана причина: ' . lowerFirstRu($reasonRu) . '.';
+    }
+
+    return $subject . ' не сыграет до конца сезона.';
+}
+
 function translateCommentRu(string $comment): string
 {
     $comment = trim($comment);
@@ -2372,7 +2429,7 @@ function translateCommentRu(string $comment): string
     $cleanComment = trim($cleanComment);
     $lower = mb_strtolower($comment, 'UTF-8');
 
-    if (preg_match('/out for (the )?(remainder of the )?season|season is over|done for (the )?season|ruled out for (the )?season/i', $comment)) {
+    if (hasSeasonEndingSignal($comment)) {
         return 'Не сыграет до конца сезона.';
     }
 
@@ -2450,7 +2507,7 @@ function extractReturnDateRu(string $estimatedReturnRaw, string $commentRaw): st
 
     if ($estimatedReturnRaw !== '') {
         $lower = mb_strtolower($estimatedReturnRaw, 'UTF-8');
-        if ($lower === 'out for season') {
+        if (hasSeasonEndingSignal($estimatedReturnRaw)) {
             return 'До конца сезона';
         }
         if ($lower === 'no timetable' || $lower === 'tbd') {
@@ -2469,7 +2526,7 @@ function extractReturnDateRu(string $estimatedReturnRaw, string $commentRaw): st
         }
     }
 
-    if (preg_match('/out for (the )?(remainder of the )?season|season is over|done for (the )?season|ruled out for (the )?season/i', $commentRaw)) {
+    if (hasSeasonEndingSignal($commentRaw)) {
         return 'До конца сезона';
     }
 
