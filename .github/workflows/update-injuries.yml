@@ -26,6 +26,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y php-cli php-curl php-mbstring poppler-utils
 
+      - name: Load current live JSON from aanba.info
+        run: |
+          mkdir -p data
+          curl --fail --silent --show-error --location --max-time 25 \
+            "https://aanba.info/data/injuries.json?cache_bust=$(date +%s)" \
+            -o data/injuries.json \
+            && echo "Loaded current live JSON from aanba.info" \
+            || echo "Live JSON was not downloaded; using repository copy as fallback"
+
       - name: Run updater
         run: php scripts/update_injuries.php
 
