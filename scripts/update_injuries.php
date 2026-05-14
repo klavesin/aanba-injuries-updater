@@ -240,7 +240,26 @@ try {
     ensureDirectories();
     logLine('INFO', 'Запуск update_injuries.php');
 
-    $officialRows = fetchOfficialNbaRows();
+    $officialReport = fetchOfficialNbaReport();
+
+    if (($officialReport['state'] ?? '') === 'not_yet_submitted') {
+        $previousPayload = readExistingPayload(DATA_FILE);
+        $payload = buildWaitingForTeamSubmissionPayload($previousPayload, $officialReport);
+        writeJsonAtomic(DATA_FILE, $payload);
+
+        $previousItemsCount = count($payload['items'] ?? []);
+        logLine('INFO', 'Свежий PDF NBA найден, но команды пока не подали строки игроков. В таблице оставлен последний полный список с игроками. Записей из предыдущего полного отчёта: ' . $previousItemsCount);
+
+        respond(true, 'Свежий PDF NBA пока пустой. В таблице показан последний полный список с игроками.', [
+            'last_updated' => $payload['last_updated'],
+            'records' => $previousItemsCount,
+            'status' => $payload['status'],
+            'official_pdf_url' => getOfficialPdfUrl(),
+        ]);
+        return;
+    }
+
+    $officialRows = $officialReport['rows'] ?? [];
     if ($officialRows === []) {
         throw new RuntimeException('Official NBA report не дал ни одной записи. Последний успешный JSON оставлен без изменений.');
     }
@@ -354,6 +373,12 @@ function respond(bool $ok, string $message, array $extra = [], int $statusCode =
 
 function fetchOfficialNbaRows(): array
 {
+    $report = fetchOfficialNbaReport();
+    return $report['rows'] ?? [];
+}
+
+function fetchOfficialNbaReport(): array
+{
     $pdfUrls = discoverOfficialPdfUrlsDirect();
     if ($pdfUrls === []) {
         throw new RuntimeException('Не удалось найти свежие официальные injury report PDF NBA на странице official.nba.com.');
@@ -377,12 +402,29 @@ function fetchOfficialNbaRows(): array
             }
 
             $rows = parseOfficialPdfText($pdfText);
-            if ($rows === []) {
-                throw new RuntimeException('PDF распознан, но parser не получил ни одной строки.');
+            if ($rows !== []) {
+                logLine('INFO', 'Получено строк из official NBA: ' . count($rows) . '. PDF: ' . $pdfUrl);
+                return [
+                    'state' => 'ok',
+                    'rows' => $rows,
+                    'pdf_url' => $pdfUrl,
+                    'not_yet_submitted_count' => 0,
+                ];
             }
 
-            logLine('INFO', 'Получено строк из official NBA: ' . count($rows) . '. PDF: ' . $pdfUrl);
-            return $rows;
+            $notYetInfo = detectNotYetSubmittedReport($pdfText);
+            if (($notYetInfo['is_not_yet_submitted'] ?? false) === true) {
+                logLine('INFO', 'Свежий PDF NBA распознан, но команды пока не подали строки игроков. NOT YET SUBMITTED: ' . (int)($notYetInfo['count'] ?? 0) . '. PDF: ' . $pdfUrl);
+
+                return [
+                    'state' => 'not_yet_submitted',
+                    'rows' => [],
+                    'pdf_url' => $pdfUrl,
+                    'not_yet_submitted_count' => (int)($notYetInfo['count'] ?? 0),
+                ];
+            }
+
+            throw new RuntimeException('PDF распознан, но parser не получил ни одной строки.');
         } catch (Throwable $e) {
             $lastError = $e->getMessage();
             logLine('WARN', 'Не удалось обработать PDF ' . $pdfUrl . ': ' . $lastError);
@@ -664,6 +706,22 @@ function parseOfficialPdfText(string $text): array
     }
 
     return parseOfficialPdfTextFallback($text);
+}
+
+function detectNotYetSubmittedReport(string $text): array
+{
+    $normalized = str_replace(["\r\n", "\r"], "\n", $text);
+    $hasOfficialHeader = str_contains($normalized, 'Game Date')
+        && str_contains($normalized, 'Player Name')
+        && str_contains($normalized, 'Current Status');
+
+    $count = substr_count($normalized, 'NOT YET SUBMITTED');
+    $hasStatusSignal = preg_match('/\b(Out|Questionable|Doubtful|Available|Probable|Game-Time Decision)\b/u', $normalized) === 1;
+
+    return [
+        'is_not_yet_submitted' => $hasOfficialHeader && $count > 0 && !$hasStatusSignal,
+        'count' => $count,
+    ];
 }
 
 function parseOfficialPdfTextByColumns(string $text): array
@@ -1489,6 +1547,88 @@ function medicalMarkerSentenceRu(string $reasonRu): string
     return ' В свежем отчёте лиги указана причина: ' . lowerFirstRu($reasonRu) . '.';
 }
 
+function readExistingPayload(string $path): array
+{
+    if (!is_file($path)) {
+        return [];
+    }
+
+    $raw = file_get_contents($path);
+    if ($raw === false || trim($raw) === '') {
+        return [];
+    }
+
+    $payload = json_decode($raw, true);
+    return is_array($payload) ? $payload : [];
+}
+
+function buildWaitingForTeamSubmissionPayload(array $previousPayload, array $officialReport): array
+{
+    $checkedAt = formatMoscowDateTime();
+    $previousMeta = is_array($previousPayload['meta'] ?? null) ? $previousPayload['meta'] : [];
+    $previousStats = is_array($previousMeta['stats'] ?? null) ? $previousMeta['stats'] : [];
+    $previousItems = is_array($previousPayload['items'] ?? null) ? $previousPayload['items'] : [];
+
+    $previousWasWaiting = (($previousPayload['status'] ?? '') === 'waiting_for_team_submission')
+        || (($previousMeta['items_are_from_previous_report'] ?? false) === true);
+
+    $lastReportWithRowsAt = $previousWasWaiting
+        ? (string)($previousMeta['last_report_with_rows_at'] ?? '')
+        : (string)($previousPayload['last_updated'] ?? '');
+
+    if ($lastReportWithRowsAt === '') {
+        $lastReportWithRowsAt = 'неизвестно';
+    }
+
+    $lastReportWithRowsPdfUrl = $previousWasWaiting
+        ? (string)($previousMeta['last_report_with_rows_pdf_url'] ?? '')
+        : (string)($previousStats['official_pdf_url'] ?? '');
+
+    $message = 'Проверено сейчас. Новый официальный отчёт NBA пока пустой. В таблице показан последний полный список с игроками.';
+
+    return [
+        'site_title' => (string)($previousPayload['site_title'] ?? 'Травмы игроков NBA'),
+        'site_subtitle' => (string)($previousPayload['site_subtitle'] ?? 'Статусы игроков перед ближайшими матчами NBA. Кто сыграет, кто пропустит, причины и сроки возвращения.'),
+        'last_updated' => $checkedAt,
+        'status' => 'waiting_for_team_submission',
+        'source_label' => 'NBA + ESPN/CBS',
+        'data_state_label' => 'Команды пока не подали новый отчёт',
+        'feed_mode_label' => 'Последний полный отчёт с игроками',
+        'meta' => [
+            'timezone' => 'Europe/Moscow',
+            'generated_at' => $checkedAt,
+            'schema_version' => '1.2.1',
+            'primary_status_source' => 'official_nba',
+            'return_source_priority' => ['espn', 'cbs', 'automatic_long_term_status', 'fallback_by_status'],
+            'translation_mode' => (string)($previousMeta['translation_mode'] ?? 'ru_reason_with_external_context_and_player_dictionary'),
+            'status_map' => STATUS_MAP_RU,
+            'current_official_pdf_url' => (string)($officialReport['pdf_url'] ?? getOfficialPdfUrl() ?? ''),
+            'current_official_pdf_state' => 'not_yet_submitted',
+            'current_official_pdf_checked_at' => $checkedAt,
+            'current_official_pdf_not_yet_submitted_count' => (int)($officialReport['not_yet_submitted_count'] ?? 0),
+            'last_report_with_rows_at' => $lastReportWithRowsAt,
+            'last_report_with_rows_pdf_url' => $lastReportWithRowsPdfUrl,
+            'items_are_from_previous_report' => true,
+            'message' => $message,
+            'notes' => [
+                'Свежий официальный PDF NBA найден и прочитан, но команды пока не подали строки игроков.',
+                'Чтобы сайт не показывал пустую таблицу, в items оставлен последний полный список с игроками.',
+                'last_updated означает время последней проверки NBA, а last_report_with_rows_at — время последнего полного отчёта с игроками.',
+                'Статусы игроков в таблице не считаются новым отчётом NBA; это последние доступные данные по игрокам.',
+            ],
+            'stats' => [
+                'official_pdf_url' => (string)($officialReport['pdf_url'] ?? getOfficialPdfUrl() ?? ''),
+                'official_rows' => 0,
+                'previous_items' => count($previousItems),
+                'espn_rows' => 0,
+                'cbs_rows' => 0,
+                'enrichment_merge' => $previousStats['enrichment_merge'] ?? [],
+            ],
+        ],
+        'items' => $previousItems,
+    ];
+}
+
 function buildPayload(array $items, int $officialCount, int $espnCount, int $cbsCount, ?string $officialPdfUrl): array
 {
     $updatedAt = formatMoscowDateTime();
@@ -1504,7 +1644,7 @@ function buildPayload(array $items, int $officialCount, int $espnCount, int $cbs
         'meta' => [
             'timezone' => 'Europe/Moscow',
             'generated_at' => $updatedAt,
-            'schema_version' => '1.2.0',
+            'schema_version' => '1.2.1',
             'primary_status_source' => 'official_nba',
             'return_source_priority' => ['espn', 'cbs', 'automatic_long_term_status', 'fallback_by_status'],
             'translation_mode' => 'ru_reason_with_external_context_and_player_dictionary',
