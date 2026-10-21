@@ -10,7 +10,7 @@ const DATA_FILE = DATA_DIR . '/injuries.json';
 const LOG_FILE = LOG_DIR . '/update_injuries.log';
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
-const OFFICIAL_REPORT_PAGE = 'https://official.nba.com/nba-injury-report-2025-26-season/';
+const OFFICIAL_REPORT_PAGE = 'https://official.nba.com/nba-injury-report-2026-27-season/';
 
 const PDF_CONNECT_TIMEOUT = 30;
 const PDF_DOWNLOAD_TIMEOUT = 120;
