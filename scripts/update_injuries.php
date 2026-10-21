@@ -403,6 +403,7 @@ function fetchOfficialNbaReport(): array
 
             $rows = parseOfficialPdfText($pdfText);
             if ($rows !== []) {
+                logLine('INFO', 'Контроль PDF: ' . countOfficialPdfStatusCells($pdfText) . ' статусных строк, ' . count($rows) . ' записей.');
                 logLine('INFO', 'Получено строк из official NBA: ' . count($rows) . '. PDF: ' . $pdfUrl);
                 return [
                     'state' => 'ok',
@@ -427,6 +428,9 @@ function fetchOfficialNbaReport(): array
             throw new RuntimeException('PDF распознан, но parser не получил ни одной строки.');
         } catch (Throwable $e) {
             $lastError = $e->getMessage();
+            if (str_starts_with($lastError, 'PDF INTEGRITY FAIL')) {
+                throw $e; // Keep last correct JSON; do not roll back to an older PDF silently.
+            }
             logLine('WARN', 'Не удалось обработать PDF ' . $pdfUrl . ': ' . $lastError);
         }
     }
@@ -700,12 +704,207 @@ function parseOfficialPdfText(string $text): array
 {
     $text = str_replace(["\r\n", "\r"], "\n", $text);
 
-    $rows = parseOfficialPdfTextByColumns($text);
-    if ($rows !== []) {
+    // Each PDF page may have DIFFERENT column offsets. Do not reuse page 1's
+    // fixed positions for all pages. Parse spaced cells instead.
+    $rows = parseOfficialPdfTextAdaptive($text);
+    $expected = countOfficialPdfStatusRows($text);
+    $statusCells = countOfficialPdfStatusCells($text);
+    assertOfficialPdfPageCoverage($text);
+    if ($expected !== $statusCells) {
+        throw new RuntimeException(sprintf('PDF INTEGRITY FAIL: статусных строк %d, распознано имён со статусами %d. Формат отчёта изменился или извлечён неполный текст.', $statusCells, $expected));
+    }
+
+    if ($expected > 0) {
+        assertOfficialPdfIntegrity($rows, $expected);
         return $rows;
     }
 
+    // Retain legacy fallback for a fundamentally different text extraction.
     return parseOfficialPdfTextFallback($text);
+}
+
+/** Count rows independently of parsed team/context fields. */
+function countOfficialPdfStatusRows(string $text): int
+{
+    $count = 0;
+    foreach (explode("\n", str_replace(["\r\n", "\r"], "\n", $text)) as $line) {
+        $cells = preg_split('/\s{2,}/u', trim($line)) ?: [];
+        foreach ($cells as $i => $cell) {
+            if ($i > 0 && isset(STATUS_MAP_RU[$cell])
+                && preg_match('/^[\p{L}][\p{L} .\x27-]*,\s*[\p{L}][\p{L} .\x27-]*$/u', $cells[$i - 1]) === 1) {
+                $count++;
+                break;
+            }
+        }
+    }
+    return $count;
+}
+
+/** Independent status-cell count, even if a player name does not match the normal pattern. */
+function countOfficialPdfStatusCells(string $text): int
+{
+    $count = 0;
+    foreach (explode("\n", str_replace(["\r\n", "\r"], "\n", $text)) as $line) {
+        $cells = preg_split('/\s{2,}/u', trim($line)) ?: [];
+        foreach ($cells as $cell) {
+            if (isset(STATUS_MAP_RU[$cell])) {
+                $count++;
+                break;
+            }
+        }
+    }
+    return $count;
+}
+
+function assertOfficialPdfPageCoverage(string $text): void
+{
+    if (preg_match_all('/\bPage\s+(\d+)\s+of\s+(\d+)\b/u', $text, $m, PREG_SET_ORDER) === 0) {
+        return; // Other PDF generations may not print page footers.
+    }
+    $pages = [];
+    $total = 0;
+    foreach ($m as $page) {
+        $n = (int)$page[1];
+        $declared = (int)$page[2];
+        if ($total !== 0 && $total !== $declared) {
+            throw new RuntimeException('PDF INTEGRITY FAIL: противоречивое количество страниц.');
+        }
+        $total = $declared;
+        $pages[$n] = true;
+    }
+    for ($i = 1; $i <= $total; $i++) {
+        if (!isset($pages[$i])) {
+            throw new RuntimeException('PDF INTEGRITY FAIL: текст страницы ' . $i . ' из ' . $total . ' не извлечён.');
+        }
+    }
+}
+
+function assertOfficialPdfIntegrity(array $rows, int $expected): void
+{
+    if ($expected !== count($rows)) {
+        throw new RuntimeException(sprintf('PDF INTEGRITY FAIL: в исходном PDF %d строк игроков, распознано %d. Публикация запрещена.', $expected, count($rows)));
+    }
+
+    foreach ($rows as $row) {
+        $reason = trim((string)($row['raw_reason'] ?? ''));
+        $team = (string)($row['team'] ?? '');
+        $matchup = (string)($row['matchup'] ?? '');
+        if ($reason === '' || strlen($reason) > 350 || $team === '' || $matchup === ''
+            || preg_match('/(?:Injury\/Illness).*(?:Injury\/Illness)/u', $reason) === 1) {
+            throw new RuntimeException('PDF INTEGRITY FAIL: некорректная причина/команда/матч у ' . ($row['player_name'] ?? '?') . '. Публикация запрещена.');
+        }
+        if (preg_match('/^([A-Z]{2,3})@([A-Z]{2,3})$/', $matchup, $m) !== 1
+            || ($team !== canonicalTeam($m[1]) && $team !== canonicalTeam($m[2]))) {
+            throw new RuntimeException('PDF INTEGRITY FAIL: команда игрока ' . ($row['player_name'] ?? '?') . ' не участвует в ' . $matchup . '. Публикация запрещена.');
+        }
+    }
+}
+
+/** Missing reason is distinct from an explicit '-' in the NBA source. */
+function finalizeCheckedOfficialRow(array $pending): array
+{
+    if (trim((string)($pending['raw_reason'] ?? '')) === '') {
+        throw new RuntimeException('PDF INTEGRITY FAIL: причина не прочитана у ' . ($pending['player_name'] ?? '?'));
+    }
+    return finalizeOfficialRow($pending);
+}
+
+/**
+ * Read pdftotext -layout as semantic columns separated by 2+ spaces.
+ * Unlike fixed offsets, works even when page 2+ omits the table header and
+ * horizontally shifts the entire table. Team and game context spans pages.
+ */
+function parseOfficialPdfTextAdaptive(string $text): array
+{
+    $rows = [];
+    $currentDate = '';
+    $currentTime = '';
+    $currentMatchup = '';
+    $currentTeam = '';
+    $pending = null;
+    $aheadReason = [];
+
+    foreach (explode("\n", $text) as $rawLine) {
+        $line = trim($rawLine);
+        if ($line === '' || str_starts_with($line, 'Injury Report:')
+            || preg_match('/^Page \d+ of \d+$/', $line) === 1
+            || str_contains($line, 'Player Name') && str_contains($line, 'Current Status')) {
+            continue;
+        }
+
+        $cells = preg_split('/\s{2,}/u', $line) ?: [];
+        if ($cells === []) {
+            continue;
+        }
+
+        // Metadata is emitted at the left; several cells can be present
+        // on the same line as the first player of a game or a new team.
+        while ($cells !== []) {
+            $first = trim($cells[0]);
+            if (preg_match('/^\d{2}\/\d{2}\/\d{4}$/', $first) === 1) {
+                $currentDate = $first;
+            } elseif (preg_match('/^\d{2}:\d{2}\s*\(ET\)$/', $first) === 1) {
+                $currentTime = $first;
+            } elseif (preg_match('/^[A-Z]{2,3}@[A-Z]{2,3}$/', $first) === 1) {
+                $currentMatchup = $first;
+            } elseif (isset(TEAM_ALIASES[$first])) {
+                $currentTeam = canonicalTeam($first);
+            } else {
+                break;
+            }
+            array_shift($cells);
+        }
+
+        if ($cells === [] || in_array('NOT YET SUBMITTED', $cells, true)) {
+            continue;
+        }
+
+        $statusAt = findOfficialStatusIndex($cells);
+        $name = $statusAt !== null && $statusAt > 0 ? trim($cells[$statusAt - 1]) : '';
+        $hasPlayer = $name !== '' && preg_match('/^[\p{L}][\p{L} .\x27-]*,\s*[\p{L}][\p{L} .\x27-]*$/u', $name) === 1;
+
+        if ($hasPlayer) {
+            if ($pending !== null) {
+                $rows[] = finalizeCheckedOfficialRow($pending);
+            }
+            $reason = trim(implode(' ', array_merge($aheadReason, array_slice($cells, $statusAt + 1))));
+            $aheadReason = [];
+            $pending = [
+                'player_name' => normalizePlayerName($name),
+                'team' => $currentTeam,
+                'raw_status' => $cells[$statusAt],
+                'raw_reason' => $reason,
+                'report_date' => normalizeSlashDate($currentDate),
+                'game_date' => normalizeSlashDate($currentDate),
+                'game_time_et' => $currentTime,
+                'matchup' => $currentMatchup,
+            ];
+            continue;
+        }
+
+        // A cell in the reason column can appear BEFORE its player row.
+        // The same PDF also breaks some reasons AFTER the player row.
+        $part = trim(implode(' ', $cells));
+        if ($part === '') {
+            continue;
+        }
+        $newReason = preg_match('/^(?:Injury\/Illness\s*-|Illness\s*-|G League\s*-|Not With Team\b)/i', $part) === 1;
+        if ($newReason && $pending !== null && trim((string)$pending['raw_reason']) === '' && $aheadReason === []) {
+            $pending['raw_reason'] = $part;
+        } elseif ($newReason) {
+            $aheadReason[] = $part;
+        } elseif ($aheadReason !== []) {
+            $aheadReason[] = $part;
+        } elseif ($pending !== null) {
+            $pending['raw_reason'] = trim((string)$pending['raw_reason'] . ' ' . $part);
+        }
+    }
+
+    if ($pending !== null) {
+        $rows[] = finalizeCheckedOfficialRow($pending);
+    }
+
+    return dedupeByKey($rows, static fn(array $r): string => buildSourceKey($r['player_name'], $r['team']) . '|' . ($r['report_date'] ?? ''));
 }
 
 function detectNotYetSubmittedReport(string $text): array
