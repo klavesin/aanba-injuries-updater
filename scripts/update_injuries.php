@@ -122,7 +122,7 @@ const PLAYER_RU_MAP = [
     'Jimmy Butler' => 'Джимми Батлер',
     'Klay Thompson' => 'Клэй Томпсон',
     'Jonathan Kuminga' => 'Джонатан Куминга',
-    'Brandin Podziemski' => 'Брэндин Поджемски',
+    'Brandin Podziemski' => 'Брэндин Подземски',
     'Andrew Wiggins' => 'Эндрю Уиггинс',
     'Giannis Antetokounmpo' => 'Яннис Адетокунбо',
     'Damian Lillard' => 'Дэмиан Лиллард',
@@ -440,62 +440,216 @@ function fetchOfficialNbaReport(): array
 
 function fetchEspnRows(): array
 {
-    $html = httpGet('https://www.espn.com/nba/injuries');
-    $lines = normalizeHtmlToLines($html);
-    $rows = [];
-    $currentTeam = null;
+    // ESPN's public-facing HTML currently may display bot checks instead of injury data.
+    // Prefer its machine-readable site-v2 endpoint; it is not a contractual/public API.
+    $json = httpGet('https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries');
+    $rows = parseEspnApiInjuries($json);
+    if ($rows === []) {
+        logLine('WARN', 'ESPN JSON API доступен, но проверенных строк травм нет.');
+    }
+    return $rows;
+}
 
-    foreach ($lines as $line) {
-        if (isset(TEAM_ALIASES[$line])) {
-            $currentTeam = canonicalTeam($line);
-            continue;
-        }
-
-        if ($currentTeam === null) {
-            continue;
-        }
-
-        if ($line === 'NAME POS EST. RETURN DATE STATUS COMMENT' || $line === 'NAME POS RETURN DATE STATUS COMMENT') {
-            continue;
-        }
-
-        $parsed = parseEspnLine($line, $currentTeam);
-        if ($parsed !== null) {
-            $rows[] = $parsed;
-        }
+function parseEspnApiInjuries(string $json): array
+{
+    $payload = json_decode($json, true);
+    if (!is_array($payload) || !array_key_exists('injuries', $payload) || !is_array($payload['injuries'])) {
+        throw new RuntimeException('ESPN JSON API: отсутствует ожидаемый массив injuries.');
     }
 
+    $rows = [];
+    foreach ($payload['injuries'] as $group) {
+        if (!is_array($group)) {
+            continue;
+        }
+        // ESPN historically serves both flat entries and team-grouped responses.
+        $records = isset($group['injuries']) && is_array($group['injuries']) ? $group['injuries'] : [$group];
+        foreach ($records as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            $team = espnInjuryTeam($entry['team'] ?? $group['team'] ?? []);
+            $athlete = $entry['athlete'] ?? [];
+            if ($team === '' || !is_array($athlete)) {
+                continue;
+            }
+            $player = normalizePlayerName(trim((string)($athlete['displayName'] ?? $athlete['fullName'] ?? '')));
+            if ($player === '' || !str_contains($player, ' ')) {
+                continue;
+            }
+            $returnRaw = trim((string)($entry['returnDate'] ?? ''));
+            if ($returnRaw !== '' && preg_match('/^\d{4}-\d{2}-\d{2}/', $returnRaw)) {
+                $time = strtotime($returnRaw);
+                $returnRaw = $time === false ? '' : gmdate('M j', $time);
+            }
+            $comment = trim((string)($entry['longComment'] ?? $entry['shortComment'] ?? ''));
+            $injury = $entry['injury'] ?? [];
+            $injuryRaw = is_array($injury) ? trim((string)($injury['detail'] ?? $injury['type'] ?? '')) : '';
+            $rows[] = [
+                'source' => 'espn',
+                'player_name' => $player,
+                'team' => $team,
+                'estimated_return_raw' => $returnRaw,
+                'comment_raw' => $comment,
+                'status_hint_raw' => trim((string)($entry['status'] ?? '')),
+                'injury_raw' => $injuryRaw,
+                'report_date' => todayYmd(),
+            ];
+        }
+    }
     return dedupeByKey($rows, static fn(array $row): string => buildSourceKey($row['player_name'], $row['team']));
+}
+
+function espnInjuryTeam(mixed $value): string
+{
+    if (!is_array($value)) {
+        return '';
+    }
+    foreach (['displayName', 'name', 'abbreviation'] as $key) {
+        $name = trim((string)($value[$key] ?? ''));
+        if ($name !== '' && isset(TEAM_ALIASES[$name])) {
+            return TEAM_ALIASES[$name];
+        }
+    }
+    // ESPN's legacy NBA team IDs, used only if the name and abbreviation are absent.
+    $byId = [
+        1=>'Atlanta Hawks', 2=>'Boston Celtics', 3=>'New Orleans Pelicans',
+        4=>'Chicago Bulls', 5=>'Cleveland Cavaliers', 6=>'Dallas Mavericks',
+        7=>'Denver Nuggets', 8=>'Detroit Pistons', 9=>'Golden State Warriors',
+        10=>'Houston Rockets', 11=>'Indiana Pacers', 12=>'Los Angeles Clippers',
+        13=>'Los Angeles Lakers', 14=>'Miami Heat', 15=>'Milwaukee Bucks',
+        16=>'Minnesota Timberwolves', 17=>'Brooklyn Nets', 18=>'New York Knicks',
+        19=>'Orlando Magic', 20=>'Philadelphia 76ers', 21=>'Phoenix Suns',
+        22=>'Portland Trail Blazers', 23=>'Sacramento Kings', 24=>'San Antonio Spurs',
+        25=>'Oklahoma City Thunder', 26=>'Utah Jazz', 27=>'Washington Wizards',
+        28=>'Toronto Raptors', 29=>'Memphis Grizzlies', 30=>'Charlotte Hornets',
+    ];
+    return $byId[(int)($value['id'] ?? 0)] ?? '';
 }
 
 function fetchCbsRows(): array
 {
     $html = httpGet('https://www.cbssports.com/nba/injuries/');
+    $rows = parseCbsHtmlInjuries($html);
+    if ($rows === []) {
+        logLine('WARN', 'CBS HTML доступен, но таблицы с данными игроков не распознаны.');
+    }
+    return $rows;
+}
+
+function parseCbsHtmlInjuries(string $html): array
+{
+    // Keep cell boundaries and table row boundaries. Raw strip_tags() glued CBS
+    // player/position/date/status together, causing systematic zero matches.
+    $html = preg_replace('/<script\b[^>]*>.*?<\/script>/is', '', $html) ?? $html;
+    $html = preg_replace('/<style\b[^>]*>.*?<\/style>/is', '', $html) ?? $html;
+    $html = preg_replace('/<\/(td|th)>/i', ' | ', $html) ?? $html;
+    $html = preg_replace('/<\/(h[1-6]|tr|table|section|article)>/i', "\n", $html) ?? $html;
     $lines = normalizeHtmlToLines($html);
     $rows = [];
-    $currentTeam = null;
-
+    $team = '';
+    $inInjuries = false;
     foreach ($lines as $line) {
-        if (isset(TEAM_ALIASES[$line])) {
-            $currentTeam = canonicalTeam($line);
+        if (preg_match('/^NBA Injuries$/i', $line)) {
+            $inInjuries = true;
             continue;
         }
-
-        if ($currentTeam === null) {
+        if (!$inInjuries) {
             continue;
         }
-
-        if (str_contains($line, 'Player Position Updated Injury Injury Status')) {
+        $candidateTeam = cbsInjuryTeam($line);
+        if ($candidateTeam !== '') {
+            $team = $candidateTeam;
             continue;
         }
-
-        $parsed = parseCbsLine($line, $currentTeam);
-        if ($parsed !== null) {
-            $rows[] = $parsed;
+        if ($team === '' || !str_contains($line, '|')) {
+            continue;
+        }
+        $row = parseCbsTableLine($line, $team);
+        if ($row !== null) {
+            $rows[] = $row;
         }
     }
-
     return dedupeByKey($rows, static fn(array $row): string => buildSourceKey($row['player_name'], $row['team']));
+}
+
+function cbsInjuryTeam(string $label): string
+{
+    $label = trim(preg_replace('/\s+/u', ' ', $label) ?? $label);
+    if (isset(TEAM_ALIASES[$label])) {
+        return TEAM_ALIASES[$label];
+    }
+    $map = [
+        'Golden St.' => 'Golden State Warriors',
+        'L.A. Clippers' => 'Los Angeles Clippers',
+        'L.A. Lakers' => 'Los Angeles Lakers',
+        'Oklahoma City' => 'Oklahoma City Thunder',
+    ];
+    return $map[$label] ?? '';
+}
+
+function cbsPlayerNameFromCell(string $value): string
+{
+    $value = trim($value);
+    // CBS renders abbreviated + full names in one cell, often without a separator:
+    // "M. GueyeMouhamed Gueye", "Y. Konan NiederhauserYanic Konan Niederhauser".
+    if (preg_match('/^([A-Z])\./', $value, $m)) {
+        $shortInitial = $m[1];
+        $separated = preg_replace('/([a-z])([A-Z])/', '$1|$2', $value) ?? $value;
+        $separated = preg_replace('/([A-Z])([A-Z][a-z]{2,})/', '$1|$2', $separated) ?? $separated;
+        $parts = explode('|', $separated);
+        for ($i = count($parts) - 1; $i >= 1; $i--) {
+            $candidate = trim($parts[$i]);
+            if (str_starts_with($candidate, $shortInitial)
+                && preg_match('/^[A-Z][A-Za-z\'.-]*(?:\s+[A-Z][A-Za-z\'.-]+)+$/', $candidate)) {
+                return $candidate;
+            }
+        }
+    }
+    return extractFullNameFromMixedString($value);
+}
+
+function parseCbsTableLine(string $line, string $team): ?array
+{
+    $cells = array_map('trim', explode('|', $line));
+    $cells = array_values(array_filter($cells, static fn(string $x): bool => $x !== ''));
+    if (count($cells) < 5) {
+        return null;
+    }
+    $pos = $cells[1];
+    if (!preg_match('/^(PG|SG|SF|PF|C|G|F)$/', $pos)) {
+        return null;
+    }
+    $updated = $cells[2];
+    if (!preg_match('/^[A-Z][a-z]{2},\s+[A-Z][a-z]{2}\s+\d{1,2}$/', $updated)) {
+        return null;
+    }
+    $player = cbsPlayerNameFromCell($cells[0]);
+    if ($player === '') {
+        return null;
+    }
+    $status = trim($cells[4]);
+    if (!preg_match('/^(Expected to be out until at least\s+[A-Z][a-z]{2}\s+\d{1,2}|Out for (?:the )?season|Out indefinitely|No timetable(?: available)?|Day[- ]To[- ]Day|Game[- ]Time Decision|Questionable|Probable|Doubtful|Available)$/i', $status)) {
+        return null;
+    }
+    $estimated = '';
+    if (preg_match('/Expected to be out until at least\s+([A-Z][a-z]{2}\s+\d{1,2})/i', $status, $m)) {
+        $estimated = $m[1];
+    } elseif (hasSeasonEndingSignal($status)) {
+        $estimated = 'Out for season';
+    } elseif (preg_match('/out indefinitely|no timetable/i', $status)) {
+        $estimated = 'No timetable';
+    }
+    return [
+        'source' => 'cbs',
+        'player_name' => normalizePlayerName($player),
+        'team' => $team,
+        'estimated_return_raw' => $estimated,
+        'comment_raw' => $status,
+        'injury_raw' => $cells[3],
+        'status_hint_raw' => '',
+        'report_date' => todayYmd(),
+    ];
 }
 
 function discoverLatestOfficialPdfUrlDirect(): string
@@ -1439,9 +1593,8 @@ function pickUniqueSecondaryPlayerMatch(array $rows, string $officialTeam): ?arr
         return $sameTeam[0];
     }
 
-    if (count($rows) === 1) {
-        return $rows[0];
-    }
+    // Never copy medical/return information between clubs based on name alone.
+    // Trades, waivers and stale third-party rosters make that unsafe.
 
     return null;
 }
