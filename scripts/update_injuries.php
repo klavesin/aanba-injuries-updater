@@ -98,7 +98,7 @@ const MONTH_MAP = [
 
 /**
  * Ручной словарь — главный источник качественного написания имён.
- * Если игрока тут нет, включается fallback-транслитерация, чтобы в интерфейсе не было английских имён.
+ * Если игрока тут нет, используем оригинальное английское имя NBA без автоматической транслитерации.
  */
 const PLAYER_RU_MAP = [
     'LeBron James' => 'Леброн Джеймс',
@@ -856,7 +856,9 @@ function parseOfficialPdfTimestamp(string $url): int
 
 function parseOfficialPdfText(string $text): array
 {
-    $text = str_replace(["\r\n", "\r"], "\n", $text);
+    // pdftotext separates pages with form-feed (\x0C). Make it a real line break:
+    // otherwise a page header can be appended to the previous player's reason.
+    $text = str_replace(["\r\n", "\r", "\x0C"], "\n", $text);
 
     // Each PDF page may have DIFFERENT column offsets. Do not reuse page 1's
     // fixed positions for all pages. Parse spaced cells instead.
@@ -877,6 +879,25 @@ function parseOfficialPdfText(string $text): array
     return parseOfficialPdfTextFallback($text);
 }
 
+/**
+ * Validate the NBA player-name CELL independently of our player dictionary.
+ * Ordinary input: "Last, First". Generational suffixes may add commas
+ * ("Udeh, Jr., Ernest"). Unknown but well-formed name segments remain valid:
+ * name spelling is NOT a reason to lose the entire report.
+ *
+ * Requiring at least one comma and rejecting digits/status/reason delimiters
+ * prevents accidental promotion of nearby PDF cells into player records.
+ */
+function isOfficialPdfPlayerName(string $name): bool
+{
+    $name = trim($name);
+    if ($name === '' || strlen($name) > 140 || preg_match('//u', $name) !== 1) {
+        return false;
+    }
+    // Match 2-4 comma-delimited name segments, without absorbing other columns.
+    return preg_match('/^[\p{L}\p{M}][\p{L}\p{M} .\x27’\-]*(?:,\s*[\p{L}\p{M}][\p{L}\p{M} .\x27’\-]*){1,3}$/u', $name) === 1;
+}
+
 /** Count rows independently of parsed team/context fields. */
 function countOfficialPdfStatusRows(string $text): int
 {
@@ -885,7 +906,7 @@ function countOfficialPdfStatusRows(string $text): int
         $cells = preg_split('/\s{2,}/u', trim($line)) ?: [];
         foreach ($cells as $i => $cell) {
             if ($i > 0 && isset(STATUS_MAP_RU[$cell])
-                && preg_match('/^[\p{L}][\p{L} .\x27-]*,\s*[\p{L}][\p{L} .\x27-]*$/u', $cells[$i - 1]) === 1) {
+                && isOfficialPdfPlayerName($cells[$i - 1])) {
                 $count++;
                 break;
             }
@@ -944,6 +965,7 @@ function assertOfficialPdfIntegrity(array $rows, int $expected): void
         $team = (string)($row['team'] ?? '');
         $matchup = (string)($row['matchup'] ?? '');
         if ($reason === '' || strlen($reason) > 350 || $team === '' || $matchup === ''
+            || str_contains($reason, 'Injury Report:') || str_contains($reason, 'Current Status')
             || preg_match('/(?:Injury\/Illness).*(?:Injury\/Illness)/u', $reason) === 1) {
             throw new RuntimeException('PDF INTEGRITY FAIL: некорректная причина/команда/матч у ' . ($row['player_name'] ?? '?') . '. Публикация запрещена.');
         }
@@ -1015,7 +1037,7 @@ function parseOfficialPdfTextAdaptive(string $text): array
 
         $statusAt = findOfficialStatusIndex($cells);
         $name = $statusAt !== null && $statusAt > 0 ? trim($cells[$statusAt - 1]) : '';
-        $hasPlayer = $name !== '' && preg_match('/^[\p{L}][\p{L} .\x27-]*,\s*[\p{L}][\p{L} .\x27-]*$/u', $name) === 1;
+        $hasPlayer = $name !== '' && isOfficialPdfPlayerName($name);
 
         if ($hasPlayer) {
             if ($pending !== null) {
@@ -1058,7 +1080,7 @@ function parseOfficialPdfTextAdaptive(string $text): array
         $rows[] = finalizeCheckedOfficialRow($pending);
     }
 
-    return dedupeByKey($rows, static fn(array $r): string => buildSourceKey($r['player_name'], $r['team']) . '|' . ($r['report_date'] ?? ''));
+    return dedupeByKey($rows, static fn(array $r): string => buildOfficialRowKey($r));
 }
 
 function detectNotYetSubmittedReport(string $text): array
@@ -1205,7 +1227,7 @@ function parseOfficialPdfTextByColumns(string $text): array
         $rows[] = finalizeOfficialRow($pending);
     }
 
-    return dedupeByKey($rows, static fn(array $row): string => buildSourceKey($row['player_name'], $row['team']) . '|' . ($row['report_date'] ?? ''));
+    return dedupeByKey($rows, static fn(array $row): string => buildOfficialRowKey($row));
 }
 
 function parseOfficialPdfTextFallback(string $text): array
@@ -1300,7 +1322,7 @@ function parseOfficialPdfTextFallback(string $text): array
         $rows[] = finalizeOfficialRow($pending);
     }
 
-    return dedupeByKey($rows, static fn(array $row): string => buildSourceKey($row['player_name'], $row['team']) . '|' . ($row['report_date'] ?? ''));
+    return dedupeByKey($rows, static fn(array $row): string => buildOfficialRowKey($row));
 }
 
 function parseEspnLine(string $line, string $team): ?array
@@ -2285,16 +2307,51 @@ function findOfficialStatusIndex(array $parts): ?int
 
 function normalizePlayerName(string $name): string
 {
-    $name = trim($name);
-
-    if (str_contains($name, ',')) {
-        [$last, $first] = array_map('trim', explode(',', $name, 2));
-        $name = trim($first . ' ' . $last);
+    $name = trim(preg_replace('/\s+/u', ' ', $name) ?? $name);
+    if (!str_contains($name, ',')) {
+        return $name;
     }
 
-    $name = preg_replace('/\s+/u', ' ', $name) ?? $name;
+    $parts = array_map('trim', explode(',', $name));
+    if (count($parts) === 2 && $parts[0] !== '' && $parts[1] !== '') {
+        // Also handle "Last, First Jr." without putting Jr. before the surname.
+        if (preg_match('/^(.*?)\s+(Jr\.?|Sr\.?|II|III|IV|V|VI)$/ui', $parts[1], $m) === 1) {
+            $suffix = normalizeNameSuffix($m[2]);
+            if ($suffix !== '' && trim($m[1]) !== '') {
+                return trim($m[1] . ' ' . $parts[0] . ' ' . $suffix);
+            }
+        }
+        return trim($parts[1] . ' ' . $parts[0]);
+    }
 
-    return trim($name);
+    if (count($parts) === 3) {
+        // NBA uses both "Last, Jr., First" and sometimes "Last, First, Jr.".
+        $middleSuffix = normalizeNameSuffix($parts[1]);
+        $lastSuffix = normalizeNameSuffix($parts[2]);
+        if ($middleSuffix !== '' && $parts[0] !== '' && $parts[2] !== '') {
+            return trim($parts[2] . ' ' . $parts[0] . ' ' . $middleSuffix);
+        }
+        if ($lastSuffix !== '' && $parts[0] !== '' && $parts[1] !== '') {
+            return trim($parts[1] . ' ' . $parts[0] . ' ' . $lastSuffix);
+        }
+    }
+
+    // Do not guess the word order for an unfamiliar multi-comma surname.
+    // It is safer to preserve NBA's original English spelling verbatim.
+    return $name;
+}
+
+function normalizeNameSuffix(string $candidate): string
+{
+    $suffix = strtolower(rtrim(trim($candidate), '.'));
+    if ($suffix === 'jr' || $suffix === 'junior') {
+        return 'Jr.';
+    }
+    if ($suffix === 'sr' || $suffix === 'senior') {
+        return 'Sr.';
+    }
+    $roman = ['ii' => 'II', 'iii' => 'III', 'iv' => 'IV', 'v' => 'V', 'vi' => 'VI'];
+    return $roman[$suffix] ?? '';
 }
 
 function playerRu(string $name): string
@@ -2320,7 +2377,14 @@ function playerRu(string $name): string
         return PLAYER_RU_MAP[$withoutSuffixNoise];
     }
 
-    return transliteratePlayerNameRu($normalized);
+    // Missing an entry is an editorial task, not an extraction failure.
+    // A faithful English spelling is better than an unverified transliteration.
+    static $unknownNamesLogged = [];
+    if ($normalized !== '' && !isset($unknownNamesLogged[$normalized])) {
+        $unknownNamesLogged[$normalized] = true;
+        logLine('WARN', 'Имя отсутствует в русском словаре, используется английское написание: ' . $normalized);
+    }
+    return $normalized;
 }
 
 function playerRuExternalMap(): array
@@ -2867,6 +2931,11 @@ function playerShortRu(string $playerRu): string
         return '';
     }
 
+    // Do not shorten an unmapped English name into an ambiguous/unnatural last name.
+    if (preg_match('/[A-Za-z]/u', $playerRu) === 1) {
+        return $playerRu;
+    }
+
     $parts = preg_split('/\s+/u', $playerRu, -1, PREG_SPLIT_NO_EMPTY);
     if (!is_array($parts) || $parts === []) {
         return $playerRu;
@@ -3199,6 +3268,16 @@ function buildPlayerMatchKey(string $playerName): string
     $name = preg_replace('/\s+/u', ' ', $name) ?? $name;
 
     return slugify(trim($name));
+}
+
+/** Exact NBA identity for PDF deduplication. Do not remove Jr./Sr./II/etc.
+ * Fuzzy player matching for ESPN/CBS keeps using buildPlayerMatchKey(). */
+function buildOfficialRowKey(array $row): string
+{
+    return slugify(normalizePlayerName((string)($row['player_name'] ?? '')))
+        . '|' . slugify(canonicalTeam((string)($row['team'] ?? '')))
+        . '|' . (string)($row['report_date'] ?? '')
+        . '|' . (string)($row['matchup'] ?? '');
 }
 
 function buildSourceKey(string $playerName, string $team): string
