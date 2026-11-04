@@ -445,7 +445,7 @@ function fetchEspnRows(): array
     $json = httpGet('https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries');
     $rows = parseEspnApiInjuries($json);
     if ($rows === []) {
-        logLine('WARN', 'ESPN JSON API доступен, но проверенных строк травм нет.');
+        logLine('WARN', 'ESPN JSON обработан, но пригодных записей нет. Проверить groups/no_team/bad_athlete в ESPN parser.');
     }
     return $rows;
 }
@@ -458,6 +458,9 @@ function parseEspnApiInjuries(string $json): array
     }
 
     $rows = [];
+    $rawGroups = count($payload['injuries']);
+    $missingTeam = 0;
+    $missingAthlete = 0;
     foreach ($payload['injuries'] as $group) {
         if (!is_array($group)) {
             continue;
@@ -468,9 +471,14 @@ function parseEspnApiInjuries(string $json): array
             if (!is_array($entry)) {
                 continue;
             }
-            $team = espnInjuryTeam($entry['team'] ?? $group['team'] ?? []);
+            $team = espnInjuryTeam($entry['team'] ?? $group['team'] ?? ($entry['athlete']['team'] ?? []));
             $athlete = $entry['athlete'] ?? [];
-            if ($team === '' || !is_array($athlete)) {
+            if ($team === '') {
+                $missingTeam++;
+                continue;
+            }
+            if (!is_array($athlete)) {
+                $missingAthlete++;
                 continue;
             }
             $player = normalizePlayerName(trim((string)($athlete['displayName'] ?? $athlete['fullName'] ?? '')));
@@ -480,7 +488,7 @@ function parseEspnApiInjuries(string $json): array
             $returnRaw = trim((string)($entry['returnDate'] ?? ''));
             if ($returnRaw !== '' && preg_match('/^\d{4}-\d{2}-\d{2}/', $returnRaw)) {
                 $time = strtotime($returnRaw);
-                $returnRaw = $time === false ? '' : gmdate('M j', $time);
+                $returnRaw = $time === false ? '' : substr($returnRaw, 0, 10);
             }
             $comment = trim((string)($entry['longComment'] ?? $entry['shortComment'] ?? ''));
             $injury = $entry['injury'] ?? [];
@@ -497,6 +505,7 @@ function parseEspnApiInjuries(string $json): array
             ];
         }
     }
+    logLine('INFO', sprintf('ESPN parser: groups=%d, rows=%d, no_team=%d, bad_athlete=%d', $rawGroups, count($rows), $missingTeam, $missingAthlete));
     return dedupeByKey($rows, static fn(array $row): string => buildSourceKey($row['player_name'], $row['team']));
 }
 
@@ -531,45 +540,189 @@ function fetchCbsRows(): array
 {
     $html = httpGet('https://www.cbssports.com/nba/injuries/');
     $rows = parseCbsHtmlInjuries($html);
-    if ($rows === []) {
-        logLine('WARN', 'CBS HTML доступен, но таблицы с данными игроков не распознаны.');
+    if ($rows !== []) {
+        return $rows;
     }
-    return $rows;
+    $isChallenge = preg_match('/captcha|verify you are human|access denied|enable javascript/i', $html) === 1;
+    logLine('WARN', sprintf('CBS by-team: bytes=%d, tr=%d, rows=0, challenge_hint=%s. Trying /daily/.',
+        strlen($html), preg_match_all('/<tr\b/i', $html), $isChallenge ? 'yes' : 'no'));
+    try {
+        $dailyHtml = httpGet('https://www.cbssports.com/nba/injuries/daily/');
+        $rows = parseCbsDailyHtmlInjuries($dailyHtml);
+        logLine('INFO', sprintf('CBS daily fallback: bytes=%d, rows=%d', strlen($dailyHtml), count($rows)));
+        return $rows;
+    } catch (Throwable $e) {
+        logLine('WARN', 'CBS daily fallback unavailable: ' . $e->getMessage());
+        return [];
+    }
 }
 
 function parseCbsHtmlInjuries(string $html): array
 {
-    // Keep cell boundaries and table row boundaries. Raw strip_tags() glued CBS
-    // player/position/date/status together, causing systematic zero matches.
-    $html = preg_replace('/<script\b[^>]*>.*?<\/script>/is', '', $html) ?? $html;
-    $html = preg_replace('/<style\b[^>]*>.*?<\/style>/is', '', $html) ?? $html;
-    $html = preg_replace('/<\/(td|th)>/i', ' | ', $html) ?? $html;
-    $html = preg_replace('/<\/(h[1-6]|tr|table|section|article)>/i', "\n", $html) ?? $html;
-    $lines = normalizeHtmlToLines($html);
-    $rows = [];
+    // CBS has changed its table markup several times. Read distinct table rows
+    // first rather than relying on the exact page heading or flattened HTML.
+    $rows = parseCbsStructuredTables($html);
+
+    // Tolerant text-only fallback for alternative layouts. Keep row boundaries.
+    // Merge both readers: CBS may use full tables and simpler markup on one page.
+    $clean = preg_replace('/<script\b[^>]*>.*?<\/script>/is', '', $html) ?? $html;
+    $clean = preg_replace('/<style\b[^>]*>.*?<\/style>/is', '', $clean) ?? $clean;
+    $clean = preg_replace('/<\/(td|th)>/i', ' | ', $clean) ?? $clean;
+    $clean = preg_replace('/<\/(h[1-6]|tr|table|section|article)>/i', "\n", $clean) ?? $clean;
+    $lines = normalizeHtmlToLines($clean);
     $team = '';
-    $inInjuries = false;
+    $started = false;
     foreach ($lines as $line) {
-        if (preg_match('/^NBA Injuries$/i', $line)) {
-            $inInjuries = true;
+        if (!$started && preg_match('/\bNBA\s+Injur(?:y|ies)\b/i', $line)) {
+            $started = true;
             continue;
         }
-        if (!$inInjuries) {
+        if (!$started) {
             continue;
         }
-        $candidateTeam = cbsInjuryTeam($line);
-        if ($candidateTeam !== '') {
-            $team = $candidateTeam;
+        $foundTeam = cbsInjuryTeam($line);
+        if ($foundTeam !== '') {
+            $team = $foundTeam;
             continue;
         }
-        if ($team === '' || !str_contains($line, '|')) {
-            continue;
-        }
-        $row = parseCbsTableLine($line, $team);
-        if ($row !== null) {
-            $rows[] = $row;
+        if ($team !== '' && str_contains($line, '|')) {
+            $row = parseCbsTableLine($line, $team);
+            if ($row !== null) {
+                $rows[] = $row;
+            }
         }
     }
+    return dedupeByKey($rows, static fn(array $row): string => buildSourceKey($row['player_name'], $row['team']));
+}
+
+/** Parse only actual CBS injury tables, using their preceding team heading. */
+function parseCbsStructuredTables(string $html): array
+{
+    $withoutScripts = preg_replace('/<script\b[^>]*>.*?<\/script>/is', '', $html) ?? $html;
+    $withoutScripts = preg_replace('/<style\b[^>]*>.*?<\/style>/is', '', $withoutScripts) ?? $withoutScripts;
+    preg_match_all('/<table\b[^>]*>.*?<\/table>/is', $withoutScripts, $foundTables, PREG_OFFSET_CAPTURE);
+    $rows = [];
+    $tableCount = 0;
+    $withTeam = 0;
+    foreach ($foundTables[0] ?? [] as [$tableHtml, $offset]) {
+        // Header must prove this is an injury table, not navigation/standings.
+        $header = cbsCleanCellText(substr($tableHtml, 0, 2500));
+        if (!preg_match('/\bPlayer\b/i', $header)
+            || !preg_match('/\bInjury\b/i', $header)
+            || !preg_match('/\bUpdated\b/i', $header)) {
+            continue;
+        }
+        $tableCount++;
+        $team = cbsTeamBeforeTable($withoutScripts, $offset);
+        if ($team === '') {
+            continue;
+        }
+        $withTeam++;
+        preg_match_all('/<tr\b[^>]*>.*?<\/tr>/is', $tableHtml, $foundRows);
+        foreach ($foundRows[0] ?? [] as $rowHtml) {
+            preg_match_all('/<t[dh]\b[^>]*>(.*?)<\/t[dh]>/is', $rowHtml, $foundCells);
+            if (count($foundCells[1] ?? []) < 5) {
+                continue;
+            }
+            $cells = array_map('cbsCleanCellText', $foundCells[1]);
+            $row = parseCbsTableLine(implode(' | ', $cells), $team);
+            if ($row !== null) {
+                $rows[] = $row;
+            }
+        }
+    }
+    logLine('INFO', sprintf('CBS parser: injury_tables=%d, tables_with_team=%d, rows=%d', $tableCount, $withTeam, count($rows)));
+    return $rows;
+}
+
+function cbsCleanCellText(string $html): string
+{
+    $html = preg_replace('/<\/(?:th|td)>/i', ' ', $html) ?? $html;
+    $text = html_entity_decode(strip_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    return trim(preg_replace('/\s+/u', ' ', $text) ?? $text);
+}
+
+function cbsTeamBeforeTable(string $html, int $offset): string
+{
+    // Team headings are close to the tables. Prefer heading tags; never guess
+    // from the page-wide NBA navigation menu.
+    $prior = substr($html, max(0, $offset - 3500), min($offset, 3500));
+    preg_match_all('/<(?:h[2-6]|button)\b[^>]*>(.*?)<\/(?:h[2-6]|button)>/is', $prior, $headings);
+    foreach (array_reverse($headings[1] ?? []) as $h) {
+        $candidate = cbsInjuryTeam(cbsCleanCellText($h));
+        if ($candidate !== '') {
+            return $candidate;
+        }
+    }
+    // Some layouts use a simple div, strong or link as section header.
+    preg_match_all('/<(?:a|div|span|strong)\b[^>]*>([^<>]{2,100})<\/(?:a|div|span|strong)>/is', substr($prior, -900), $shortLabels);
+    foreach (array_reverse($shortLabels[1] ?? []) as $label) {
+        $candidate = cbsInjuryTeam(cbsCleanCellText($label));
+        if ($candidate !== '') {
+            return $candidate;
+        }
+    }
+    return '';
+}
+
+
+/** CBS /daily/ reports team abbreviations in every row (no team headers). */
+function parseCbsDailyHtmlInjuries(string $html): array
+{
+    $clean = preg_replace('/<script\b[^>]*>.*?<\/script>/is', '', $html) ?? $html;
+    $clean = preg_replace('/<style\b[^>]*>.*?<\/style>/is', '', $clean) ?? $clean;
+    preg_match_all('/<table\b[^>]*>.*?<\/table>/is', $clean, $foundTables);
+    $rows = [];
+    $tables = 0;
+    foreach ($foundTables[0] ?? [] as $table) {
+        $header = cbsCleanCellText(substr($table, 0, 1600));
+        if (!preg_match('/\bTeam\b/i', $header)
+            || !preg_match('/\bPlayer\b/i', $header)
+            || !preg_match('/\bInjury\b/i', $header)) {
+            continue;
+        }
+        $tables++;
+        preg_match_all('/<tr\b[^>]*>.*?<\/tr>/is', $table, $foundRows);
+        foreach ($foundRows[0] ?? [] as $tr) {
+            preg_match_all('/<t[dh]\b[^>]*>(.*?)<\/t[dh]>/is', $tr, $matchedCells);
+            $cells = array_map('cbsCleanCellText', $matchedCells[1] ?? []);
+            if (count($cells) < 5) {
+                continue;
+            }
+            $abbr = trim($cells[0]);
+            $extraAliases = ['GS' => 'Golden State Warriors', 'NO' => 'New Orleans Pelicans',
+                'NY' => 'New York Knicks', 'SA' => 'San Antonio Spurs', 'PHO' => 'Phoenix Suns'];
+            $team = $extraAliases[$abbr] ?? cbsInjuryTeam($abbr);
+            if ($team === '') {
+                continue;
+            }
+            $position = trim($cells[2]);
+            $status = trim($cells[4]);
+            $player = cbsPlayerNameFromCell($cells[1]);
+            if ($player === '' || !preg_match('/^(PG|SG|SF|PF|C|G|F)$/', $position)) {
+                continue;
+            }
+            if (!preg_match('/^(Expected to be out until at least\s+[A-Z][a-z]{2}\s+\d{1,2}|Out for (?:the )?season|Out indefinitely|No timetable(?: available)?|Day[- ]To[- ]Day|Game[- ]Time Decision|Questionable|Probable|Doubtful|Available)$/i', $status)) {
+                continue;
+            }
+            $estimated = '';
+            if (preg_match('/Expected to be out until at least\s+([A-Z][a-z]{2}\s+\d{1,2})/i', $status, $m)) {
+                $estimated = $m[1];
+            } elseif (hasSeasonEndingSignal($status)) {
+                $estimated = 'Out for season';
+            } elseif (preg_match('/out indefinitely|no timetable/i', $status)) {
+                $estimated = 'No timetable';
+            }
+            $rows[] = [
+                'source' => 'cbs', 'player_name' => normalizePlayerName($player),
+                'team' => $team, 'estimated_return_raw' => $estimated,
+                'comment_raw' => $status, 'injury_raw' => $cells[3],
+                'status_hint_raw' => '', 'report_date' => todayYmd(),
+            ];
+        }
+    }
+    logLine('INFO', sprintf('CBS daily parser: tables=%d, rows=%d', $tables, count($rows)));
+    // The daily page lists newest updates first; keep the first per player/team.
     return dedupeByKey($rows, static fn(array $row): string => buildSourceKey($row['player_name'], $row['team']));
 }
 
@@ -1573,29 +1726,36 @@ function buildSecondaryIndexes(array $rows): array
 function findSecondaryMatch(array $official, array $espnIndexes, array $cbsIndexes): array
 {
     $key = buildSourceKey((string)$official['player_name'], (string)$official['team']);
-
-    if (isset($espnIndexes['exact'][$key])) {
-        return ['row' => $espnIndexes['exact'][$key], 'source' => 'espn', 'match_type' => 'exact'];
-    }
-
-    if (isset($cbsIndexes['exact'][$key])) {
-        return ['row' => $cbsIndexes['exact'][$key], 'source' => 'cbs', 'match_type' => 'exact'];
-    }
-
     $playerKey = buildPlayerMatchKey((string)$official['player_name']);
     $team = canonicalTeam((string)$official['team']);
+    $candidates = [];
 
-    $espnPlayerMatch = pickUniqueSecondaryPlayerMatch($espnIndexes['player'][$playerKey] ?? [], $team);
-    if ($espnPlayerMatch !== null) {
-        return ['row' => $espnPlayerMatch, 'source' => 'espn', 'match_type' => 'player_only'];
+    foreach (['espn' => $espnIndexes, 'cbs' => $cbsIndexes] as $source => $indexes) {
+        if (isset($indexes['exact'][$key])) {
+            $candidates[] = ['row' => $indexes['exact'][$key], 'source' => $source, 'match_type' => 'exact'];
+            continue;
+        }
+        $sameTeam = pickUniqueSecondaryPlayerMatch($indexes['player'][$playerKey] ?? [], $team);
+        if ($sameTeam !== null) {
+            $candidates[] = ['row' => $sameTeam, 'source' => $source, 'match_type' => 'player_only'];
+        }
     }
 
-    $cbsPlayerMatch = pickUniqueSecondaryPlayerMatch($cbsIndexes['player'][$playerKey] ?? [], $team);
-    if ($cbsPlayerMatch !== null) {
-        return ['row' => $cbsPlayerMatch, 'source' => 'cbs', 'match_type' => 'player_only'];
+    // Return info is the actual reason for the secondary feeds. Never let an
+    // empty ESPN record suppress a confirmed CBS estimate.
+    foreach ($candidates as $candidate) {
+        $row = $candidate['row'];
+        if (extractReturnDateRu((string)($row['estimated_return_raw'] ?? ''), (string)($row['comment_raw'] ?? '')) !== ''
+            || extractReevaluationRu((string)($row['comment_raw'] ?? '')) !== '') {
+            return $candidate;
+        }
     }
-
-    return ['row' => null, 'source' => 'fallback', 'match_type' => 'none'];
+    foreach ($candidates as $candidate) {
+        if (trim((string)($candidate['row']['comment_raw'] ?? '')) !== '') {
+            return $candidate;
+        }
+    }
+    return $candidates[0] ?? ['row' => null, 'source' => 'fallback', 'match_type' => 'none'];
 }
 
 function pickUniqueSecondaryPlayerMatch(array $rows, string $officialTeam): ?array
@@ -1651,6 +1811,9 @@ function buildReturnInfo(?array $secondary, string $rawStatus): array
     $estimatedReturnRaw = trim((string)($secondary['estimated_return_raw'] ?? ''));
     $commentRaw = trim((string)($secondary['comment_raw'] ?? ''));
     $estimatedReturnRu = extractReturnDateRu($estimatedReturnRaw, $commentRaw);
+    if ($estimatedReturnRu !== '' && preg_match('/Expected to be out until at least/i', $commentRaw)) {
+        $estimatedReturnRu = 'Не раньше ' . $estimatedReturnRu;
+    }
     $reevaluationRu = extractReevaluationRu($commentRaw);
 
     $fallbackReturn = fallbackReturnRu($rawStatus);
@@ -3165,11 +3328,32 @@ function translateCommentRu(string $comment): string
     return '';
 }
 
+function validateReportedReturnDateRu(string $rendered): string
+{
+    // Do not display a source estimate that has already expired.
+    if (!preg_match('/^\d{2}\.\d{2}\.\d{4}$/', $rendered)) {
+        return $rendered;
+    }
+    $tz = new DateTimeZone('Europe/Moscow');
+    $date = DateTimeImmutable::createFromFormat('!d.m.Y', $rendered, $tz);
+    if (!$date instanceof DateTimeImmutable || $date->format('d.m.Y') !== $rendered) {
+        return '';
+    }
+    return $date >= new DateTimeImmutable('today', $tz) ? $rendered : '';
+}
+
 function extractReturnDateRu(string $estimatedReturnRaw, string $commentRaw): string
 {
     $estimatedReturnRaw = trim($estimatedReturnRaw);
 
     if ($estimatedReturnRaw !== '') {
+        // ESPN supplies ISO dates; do not discard the year near season rollover.
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $estimatedReturnRaw)) {
+            $date = DateTimeImmutable::createFromFormat('!Y-m-d', $estimatedReturnRaw, new DateTimeZone('UTC'));
+            if ($date instanceof DateTimeImmutable && $date->format('Y-m-d') === $estimatedReturnRaw) {
+                return validateReportedReturnDateRu($date->format('d.m.Y'));
+            }
+        }
         $lower = mb_strtolower($estimatedReturnRaw, 'UTF-8');
         if (hasSeasonEndingSignal($estimatedReturnRaw)) {
             return 'До конца сезона';
@@ -3186,7 +3370,8 @@ function extractReturnDateRu(string $estimatedReturnRaw, string $commentRaw): st
 
         $dateRu = monthDayToRu($estimatedReturnRaw);
         if ($dateRu !== '') {
-            return $dateRu;
+            $dateRu = validateReportedReturnDateRu($dateRu);
+            if ($dateRu !== '') { return $dateRu; }
         }
     }
 
@@ -3201,7 +3386,8 @@ function extractReturnDateRu(string $estimatedReturnRaw, string $commentRaw): st
     if (preg_match('/Expected to be out until at least\s+([A-Z][a-z]{2}\s+\d{1,2})/i', $commentRaw, $m)) {
         $dateRu = monthDayToRu($m[1]);
         if ($dateRu !== '') {
-            return $dateRu;
+            $dateRu = validateReportedReturnDateRu($dateRu);
+            if ($dateRu !== '') { return $dateRu; }
         }
     }
 
