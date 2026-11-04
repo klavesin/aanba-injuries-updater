@@ -3234,7 +3234,11 @@ function buildSeasonEndingCommentRu(string $playerRu, string $reasonRu): string
     $hasReason = $reasonRu !== '' && $reasonRu !== '—' && $reasonRu !== 'Причина уточняется';
 
     if ($hasReason && hasMajorRecoverySignalRu($reasonRu)) {
-        return $subject . ' не сыграет до конца сезона; ожидается длительное восстановление после ' . lowerFirstRu($reasonRu) . '.';
+        if (preg_match('/^после\\s+/iu', $reasonRu) === 1) {
+            return $subject . ' не сыграет до конца сезона; ожидается длительное восстановление ' . lowerFirstRu($reasonRu) . '.';
+        }
+
+        return $subject . ' не сыграет до конца сезона. В отчёте лиги указана причина: ' . lowerFirstRu($reasonRu) . '. Ожидается длительное восстановление.';
     }
 
     if ($hasReason) {
