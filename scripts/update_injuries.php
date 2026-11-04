@@ -2693,7 +2693,7 @@ function buildReasonRu(string $reason): array
             return ['reason_ru' => 'Джи-Лига: двусторонний контракт', 'reason_detail_ru' => ''];
         }
         if (str_contains($lowerRaw, 'on assignment')) {
-            return ['reason_ru' => 'Джи-Лига: командирован', 'reason_detail_ru' => ''];
+            return ['reason_ru' => 'Отправлен в Джи-лигу', 'reason_detail_ru' => ''];
         }
         return ['reason_ru' => 'Джи-Лига', 'reason_detail_ru' => ''];
     }
